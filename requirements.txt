@@ -1,0 +1,8 @@
+accelerate==0.15.0
+datasets==2.9.0
+numpy==1.24.2
+pandas==2.0.0
+scikit-learn==1.2.1
+torch==2.0.0
+transformers==4.27.4
+wandb==0.15.3
