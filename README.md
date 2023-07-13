@@ -7,4 +7,4 @@ The code in this repository accompanies the paper "UMLS-KGI-BERT: Data-Centric K
 - To train your own version of the UMLS-KGI-BERT model, either from-scratch or from a pre-trained checkpoint, use `training_scripts/train.py`
 - To evaluate on a token classification task, use `training_scripts/token_classification.py` 
 
-Details on how to parameterise the scripts can be obtained by passing the `-h` flag.
+Details on how to parameterise the scripts can be obtained by running them with the `-h` flag.
