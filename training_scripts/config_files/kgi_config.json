@@ -1,0 +1,12 @@
+{
+    "train_set_frac": 0.9,
+    "batch_size": 15,
+    "learning_rate": 0.00002,
+    "epochs": 1,
+    "grad_acc": 2,
+    "linear_schedule_epochs": null,
+    "seq_len": 64,
+    "seed": 5318008,
+    "epoch_checkpoint_interval": 4,
+    "wandb_log_freq": 128
+}
