@@ -33,22 +33,45 @@ from data_utils import (
 TEXT_ENC = sys.getdefaultencoding()
 LOGFMT = "%(asctime)s - %(levelname)s - \t%(message)s"
 
+KG_FP_HELP = """Path to the KGI dataset, as created by the `build_dataset` script"""
+CORPUS_FP_HELP = """Path to a text file containing the training corpus for the
+masked-language task"""
+MODEL_PATH_HELP = """BERT encoder to use - must be a compatible argument for the
+`from_pretrained` method of a `transformers` pretrained model"""
+TOKENIZER_PATH_HELP = """Tokenizer to use, if different from the one specified by
+`model_path`"""
+FROM_CP_HELP = """Include this flag when continuing training from a local UMLS-KGI checkpoint"""
+ABST_HELP = """Manually add padding, masking, and separation tokens to the tokenizer during 
+data preprocessing"""
+MODEL_RUN_NAME_HELP = """Name to use for the output directory"""
+CONFIG_FILE_HELP = """Path to a json file containing additional arguments, see `config_files/kgi_config.json`"""
+N_TEXT_DOCS_HELP = """Specify a maximum number of documents to load from the `corpus_fp` file; leave unspecified
+to use all of them"""
+EXCLUDE_TASK_HELP = """Integer argument telling the model to ignore one of the training objectives (for ablation
+experiments) - 0 for entity prediction, 1 for link prediction and 2 for triple classification"""
+FP16_HELP = """Use 16-bit precision training"""
+CONST_SCHED_HELP = """Use a constant learning rate"""
+TDO_HELP = """Only update model weights based on the training data - otherwise, the model will  be trained on the
+validation set AFTER the standard training run; use this flag when you intend to continue training the model on
+the same dataset later"""
+NOSAVE_HELP = """Doesn't write anything to disk - can be useful for debugging"""
+
 
 def parse_arguments():
     parser = ArgumentParser()
-    parser.add_argument("kg_fp", type=str)
-    parser.add_argument("corpus_fp", type=str)
-    parser.add_argument("model_path", type=str)
-    parser.add_argument("--tokenizer_path", type=str)
-    parser.add_argument("--from_cp", action="store_true")
-    parser.add_argument("--add_bert_special_tokens", action="store_true")
-    parser.add_argument("--model_run_name", type=str, default="kgi")
+    parser.add_argument("kg_fp", type=str, help=KG_FP_HELP)
+    parser.add_argument("corpus_fp", type=str, help=CORPUS_FP_HELP)
+    parser.add_argument("model_path", type=str, help=MODEL_PATH_HELP)
+    parser.add_argument("--tokenizer_path", type=str, help=TOKENIZER_PATH_HELP)
+    parser.add_argument("--from_cp", action="store_true", help=FROM_CP_HELP)
+    parser.add_argument("--add_bert_special_tokens", action="store_true", help=ABST_HELP)
+    parser.add_argument("--model_run_name", type=str, default="kgi", help=MODEL_RUN_NAME_HELP)
     here, _ = os.path.split(os.path.realpath(__file__))
     default_config_file = os.path.join(here, "config_files/kgi_config.json")
-    parser.add_argument("--config_file", type=str, default=default_config_file)
-    parser.add_argument("--n_text_docs", type=int)
-    parser.add_argument("--exclude_task", type=int, choices={0, 1, 2})
-    parser.add_argument("--fp16", action="store_true")
+    parser.add_argument("--config_file", type=str, default=default_config_file, help=CONFIG_FILE_HELP)
+    parser.add_argument("--n_text_docs", type=int, help=N_TEXT_DOCS_HELP)
+    parser.add_argument("--exclude_task", type=int, choices={0, 1, 2}, help=EXCLUDE_TASK_HELP)
+    parser.add_argument("--fp16", action="store_true", help=FP16_HELP)
     parser.add_argument("--constant_schedule", action="store_true")
     parser.add_argument("--train_data_only", action="store_true")
     parser.add_argument("--nosave", action="store_true")
@@ -94,8 +117,6 @@ def run_pipeline(config):
         train_set_frac=config.train_set_frac,
         add_bert_special_tokens=config.add_bert_special_tokens
     )
-    # if config.DB:
-    #     import IPython, sys; IPython.embed(); sys.exit(0)
     rel_token_ids2labels = get_relation_labels(tokenizer)
     collate_fn = partial(mixed_collate_fn, tokenizer=tokenizer, rel_token_ids2labels=rel_token_ids2labels)
     train_dataloader = DataLoader(train_dataset, batch_size=config.batch_size, shuffle=True, collate_fn=collate_fn)
@@ -105,13 +126,11 @@ def run_pipeline(config):
     logger.info("Dataloaders prepared; setting up model: %s", config.model_path)
     if config.from_cp:
         model = KgiLMBert.from_pretrained(config.model_path)
-        # import IPython, sys; IPython.embed(); sys.exit()
-        # model_params = tuple(model.transformer.parameters())
     else:
         try:
             vocab_size = tokenizer.get_vocab_size()
         except AttributeError:
-            vocab_size = tokenizer.get_vocab().__len__()
+            vocab_size = len(tokenizer.get_vocab())
         if os.path.isfile(config.model_path):
             with open(config.model_path, encoding=TEXT_ENC) as f:
                 config_dict = json.load(f)
