@@ -10,7 +10,8 @@ The code in this repository accompanies the paper "UMLS-KGI-BERT: Data-Centric K
 Details on how to parameterise the scripts can be obtained by running them with the `-h` flag.
 
 Paper citation:
-```@inproceedings{mannion-etal-2023-umls,
+```
+@inproceedings{mannion-etal-2023-umls,
     title = "{UMLS}-{KGI}-{BERT}: Data-Centric Knowledge Integration in Transformers for Biomedical Entity Recognition",
     author = "Mannion, Aidan  and
       Schwab, Didier  and
