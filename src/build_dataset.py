@@ -1,3 +1,16 @@
+"""BERTification of the UMLS metathesaurus knowledge graph triples, i.e. construction of training
+data for the UMLS-KGI pre-training task
+There are three main parts to this:
+    1. Creating the base tables - from the standard UMLS download, create three TSV files - `concepts_ref`
+        for the preferred terms of each concept to be used (this one will have exactly one row per concept),
+        `concepts` for other terms (non-unique with respect to CUIs), and `relations` for the relationships
+        that exist among the sampled concepts. This step only needs to be run once, then each time you want
+        to create a new triplet dataset just provide the directory containing these TSV files using the 
+        `--load_base_tables` argument.
+    2. Generating the triplet dataset - sampling from the base tables, create a set of triplets
+    3. Generating training datasets - sampling in turn from the triplet dataset created in step 2, create
+        text sequences that can be tokenized for UMLS-KGI training
+"""
 import os
 import sys
 import json
@@ -11,9 +24,20 @@ import pandas as pd
 UMLS_DIR_HELP = """Path to the directory containing the base UMLS dataset (should end with
 `2022AB/META`)"""
 SRDEF_PATH_HELP = """Path to the basic information file for semantic types and relations (SRDEF
-from the UMLS semantic network )""" 
-SG_PATH_HELP = """Path to the semantic groups .txt file"""
+from the UMLS semantic network )"""
+SG_PATH_HELP = """Path to the semantic groups text file"""
 WRITE_PATH_HELP = """Directory in which to write the output datasets"""
+LANG_HELP = """Filter the dataset by language if desired. Must be specified in the format
+used by the LAT column in the concepts file, i.e. ENG, SPA, etc"""
+LBT_HELP = """Path to a directory containing already-preprocessed tables of concepts and relations
+- if not provided, will load data from `umls_dir` and create new base tables in `write_path`"""
+NSAMPLES_HELP = """Number of examples in each training dataset - the final size of the triplet
+classification dataset will be 2x this"""
+NSAMPLESBASE_HELP = """Number of triplets to create from the base data tables - if not provided
+will sample from all of the data"""
+MAXPATHLEN_HELP = """Cutoff length for the random walks across the graph to create link prediction
+sequences"""
+
 
 SRDEF_COLNAMES = "RT", "UI", "STY_or_RL", "STN_or_RTN", "DEF" \
     "EX", "UN", "NH", "ABR", "RIN"
@@ -41,25 +65,15 @@ EXCLUDE_SEMANTIC_TYPES = "Plant", "Fungus", "Animal", "Vertebrate", \
 
 def parse_arguments():
     parser = ArgumentParser()
-<<<<<<< HEAD
-    parser.add_argument("--umls_dir", type=str, default=UMLS_DIR)
-    parser.add_argument("--srdef", type=str, default=SRDEF_PATH)
-    parser.add_argument("--sg", type=str, default=SG_PATH)
-    parser.add_argument("--lang", type=str, default="FRE")
-    parser.add_argument("--write", type=str, default=WRITE_PATH)
-=======
     parser.add_argument("umls_dir", type=str, help=UMLS_DIR_HELP)
     parser.add_argument("srdef", type=str, help=SRDEF_PATH_HELP)
     parser.add_argument("sg", type=str, help=SG_PATH_HELP)
-    parser.add_argument("writepath", type=str, default=WRITE_PATH_HELP)
-    parser.add_argument("--lang", type=str, default="FRE")
->>>>>>> 6211feff8d77fa098aa174743f8f6ba9ad8721a3
+    parser.add_argument("writepath", type=str, help=WRITE_PATH_HELP)
+    parser.add_argument("--lang", type=str, help=LANG_HELP)
     parser.add_argument("--load_base_tables", type=str)
     parser.add_argument("--n_samples", type=int, default=10000)
     parser.add_argument("--n_samples_base", type=int)
     parser.add_argument("--max_path_len", type=int, default=10)
-    parser.add_argument("--save_base_tables", action="store_true")
-    parser.add_argument("--paths_only", action="store_true")
     return parser.parse_args()
 
 
@@ -78,12 +92,8 @@ def build_metathesaurus_tables(umls_path, srdef_path, sg_path, filter_types=True
     tui2sg = sem_groups.set_index("TUI").Abbrev.to_dict()
     stypes["SG"] = stypes.UI.apply(lambda x: tui2sg[x])
     if filter_types:
-<<<<<<< HEAD
-        select_types = stypes.SG.isin(INCLUDE_GROUPS) & ~stypes.STY_or_RL.isin(EXCLUDE_SEMANTIC_TYPES)
-=======
         select_types = stypes.SG.isin(INCLUDE_GROUPS) & \
             ~stypes.STY_or_RL.isin(EXCLUDE_SEMANTIC_TYPES)
->>>>>>> 6211feff8d77fa098aa174743f8f6ba9ad8721a3
         stypes = stypes[select_types]
     mrsty_usenames = ["CUI", "TUI", "STN", "STY"]
     mrsty = pd.read_csv(  # MRSTY: links CUIs to semantic types
@@ -120,11 +130,6 @@ def build_metathesaurus_tables(umls_path, srdef_path, sg_path, filter_types=True
         except NameError:
             mrconso = chunk
     mrconso = mrconso.merge(mrsty_sg.drop(["STN", "tree_depth"], axis=1), on="CUI")
-<<<<<<< HEAD
-    
-=======
-
->>>>>>> 6211feff8d77fa098aa174743f8f6ba9ad8721a3
     # in order to have a unique reference string for each concept,
     # we take the shortest preferred term
     # we put all the other terms in a separate table, which will not
@@ -139,13 +144,8 @@ def build_metathesaurus_tables(umls_path, srdef_path, sg_path, filter_types=True
         mrconso_prefterms[~mrconso_prefterms.index.isin(mrconso_ref.index)],
         mrconso[mrconso.ISPREF != "Y"]
     )).reset_index(drop=True)
-<<<<<<< HEAD
-    mrconso_reProfessionalf.drop(["ISPREF"], axis=1, inplace=True)
-    
-=======
     mrconso_ref.drop(["ISPREF"], axis=1, inplace=True)
 
->>>>>>> 6211feff8d77fa098aa174743f8f6ba9ad8721a3
     mrrel_usenames = ["CUI1", "AUI1", "REL", "CUI2", "AUI2"]
     mrrel_reader = pd.read_csv(
         os.path.join(umls_path, "MRREL.RRF"), sep="|",
@@ -162,19 +162,12 @@ def build_metathesaurus_tables(umls_path, srdef_path, sg_path, filter_types=True
     # add semantic groups to the relations table
     mrconso_ref.set_index("CUI", inplace=True)
     cui2sg = mrconso_ref.SG.to_dict()
-<<<<<<< HEAD
-    mrrel_sg_cols = {"SG" + str(i + 1): [cui2sg[cui] for cui in mrrel["CUI" + str(i + 1)]] for i in range(2)}
-    mrrel = mrrel.assign(**mrrel_sg_cols)
-    return mrconso_ref, mrconso_other, mrrel.reset_index(drop=True)
-    
-=======
     mrrel_sg_cols = {
         "SG" + str(i + 1): [cui2sg[cui] for cui in mrrel["CUI" + str(i + 1)]] for i in range(2)
     }
     mrrel = mrrel.assign(**mrrel_sg_cols)
     return mrconso_ref, mrconso_other, mrrel.reset_index(drop=True)
 
->>>>>>> 6211feff8d77fa098aa174743f8f6ba9ad8721a3
 
 def build_triple_dataset(mrrel, mrconso_ref, mrconso_other, size=None, stratify_sg=True):
     if not size:
@@ -187,17 +180,6 @@ def build_triple_dataset(mrrel, mrconso_ref, mrconso_other, size=None, stratify_
         # have the specified total dataset size
         sg_sample_sizes = (size * (sg_counts / len(mrconso_ref)) + 1).astype(int).to_dict()
         while sum(sg_sample_sizes.values()) > size:
-<<<<<<< HEAD
-            for k, v in sg_sample_sizes.items():
-                if sum(sg_sample_sizes.values()) == size:
-                    break
-                if v > 1:
-                    sg_sample_sizes[k] -= 1
-        for i, t in enumerate(sg_sample_sizes.items()):
-            sg, m = t
-            try:
-                sg_sample = mrrel[mrrel.SG2 == sg].sample(m)
-=======
             for k, val in sg_sample_sizes.items():
                 if sum(sg_sample_sizes.values()) == size:
                     break
@@ -207,18 +189,13 @@ def build_triple_dataset(mrrel, mrconso_ref, mrconso_other, size=None, stratify_
             sem_grp, sample_size = tuple_
             try:
                 sg_sample = mrrel[mrrel.SG2 == sem_grp].sample(sample_size)
->>>>>>> 6211feff8d77fa098aa174743f8f6ba9ad8721a3
             except ValueError:
                 # sometimes the number of concepts for a given semantic group is greater than
                 # the number of relations with those concepts as head entities, so `m` is too
                 # big to sample without replacement from the stratified table; in this case
                 # we just use all the relations available for the group in question. This will
                 # not affect negative sampling, but will affect the final size of the dataset
-<<<<<<< HEAD
-                sg_sample = mrrel[mrrel.SG2 == sg]
-=======
                 sg_sample = mrrel[mrrel.SG2 == sem_grp]
->>>>>>> 6211feff8d77fa098aa174743f8f6ba9ad8721a3
             if i:
                 dataset = pd.concat((dataset, sg_sample))
             else:
@@ -240,14 +217,9 @@ def build_triple_dataset(mrrel, mrconso_ref, mrconso_other, size=None, stratify_
         mrconso_other[["CUI", "STR"]].drop_duplicates(subset=["CUI"]),
         how="left", left_on="CUI1", right_on="CUI"
     ).rename({"STR": "STR1"}, axis=1).drop(["CUI"], axis=1)
-<<<<<<< HEAD
-    synonyms.STR1.fillna(synonyms.STR2, inplace=True)  # if there are no strings available other than the reference one, we reuse that
-    other_rels = other_rels.merge(bertify-umls
-=======
     # if there are no strings available other than the reference one, we reuse that
     synonyms.STR1.fillna(synonyms.STR2, inplace=True)
     other_rels = other_rels.merge(
->>>>>>> 6211feff8d77fa098aa174743f8f6ba9ad8721a3
         mrconso_ref[["STR"]], how="left", left_on="CUI1", right_on="CUI"
     ).rename({"STR": "STR1"}, axis=1)
     dataset = pd.concat((synonyms, other_rels))
@@ -259,26 +231,6 @@ def build_triple_classification_dataset(triple_dataset, mrconso_ref, mrrel, size
     triple_sample["clf_label"] = [1 for _ in range(len(triple_sample))]
     sg_sample_sizes = triple_sample[["SG2"]].reset_index(drop=False).groupby("SG2") \
         .count().iloc[:,0].to_dict()
-<<<<<<< HEAD
-    between_group_relations = triple_sample[triple_sample.SG1 != triple_sample.SG2]  # to be used in negative sampling strategy 2
-    triple_sample.drop(["SG1", "SG2"], inplace=True, axis=1)
-
-    # negative sampling strategy 1: sample a concept at random then sample & resample from the other concepts
-    # in the same semantic group until we find one for which no relation exists, then randomly select a relation
-    # to go between them
-    # this makes up (roughly) the first half of the negative sampling part, i.e. 25% of the dataset
-    relation_cui_check_idx = mrrel.CUI1 + mrrel.CUI2
-    relations = triple_sample.REL.drop_duplicates()
-    for sg, m in sg_sample_sizes.items():
-        if m == 1:
-            continue  # only do this for semantic groups with more than one representative
-        sg_concepts = mrconso_ref[mrconso_ref.SG == sg]
-        concept_sample = sg_concepts.sample(int(m / 2))
-        for _, row in concept_sample.iterrows():
-            sample_target_concept = sg_concepts.sample().reset_index().transpose().iloc[:, 0].to_dict()
-            while row.name + sample_target_concept["CUI"] in relation_cui_check_idx:  # check if a relation exists
-                sample_target_concept = sg_concepts.sample().reset_index().transpose().iloc[:, 0].to_dict()
-=======
     # to be used in negative sampling strategy 2
     between_group_relations = triple_sample[triple_sample.SG1 != triple_sample.SG2]
     triple_sample.drop(["SG1", "SG2"], inplace=True, axis=1)
@@ -301,7 +253,6 @@ def build_triple_classification_dataset(triple_dataset, mrconso_ref, mrrel, size
                 # check if a relation exists
                 sample_target_concept = sg_concepts.sample().reset_index().transpose() \
                     .iloc[:, 0].to_dict()
->>>>>>> 6211feff8d77fa098aa174743f8f6ba9ad8721a3
             neg_relation = relations.sample().item()
             triple_sample.loc[triple_sample.index.max() + 1] = [
                 sample_target_concept["CUI"],
@@ -310,16 +261,10 @@ def build_triple_classification_dataset(triple_dataset, mrconso_ref, mrrel, size
                 row.STR, sample_target_concept["STR"], 0
             ]
 
-<<<<<<< HEAD
-    # negative sampling strategy 2: find any relation for which the two concepts come from different semantic
-    # groups, then choose another two concepts from the same two semantic groups for which the same relation does
-    # not exist, and use that as a negatively-labelled triple
-=======
     # negative sampling strategy 2: find any relation for which the two concepts come from
     # different semantic groups, then choose another two concepts from the same two semantic
     # groups for which the same relation does not exist, and use that as a negatively-labelled 
     # triple
->>>>>>> 6211feff8d77fa098aa174743f8f6ba9ad8721a3
     relation_full_check_idx = relation_cui_check_idx + mrrel.REL
     while len(triple_sample) < size * 2:
         relation_sample = between_group_relations.sample()
@@ -344,30 +289,13 @@ def build_triple_classification_dataset(triple_dataset, mrconso_ref, mrrel, size
 
 def build_path_dataset(triple_dataset, size, max_path_len):
     triple_dataset_pathselect = triple_dataset[triple_dataset.REL != "SY"]
-<<<<<<< HEAD
-    path_dataset = dict()
-    path_id = 0
-    for _, sample in triple_dataset_pathselect.iterrows():
-        triple = sample.to_dict()
-        path_len = choice(range(3, max_path_len)) if max_path_len > 3 else max_path_len
-        path = dict(t0={k: triple[k] for k in ("STR2", "REL", "STR1")})
-        while len(path) < path_len:
-            prev_cui = triple["CUI1"]
-            try:
-                triple = triple_dataset_pathselect[triple_dataset_pathselect.CUI2 == prev_cui] \
-                    .sample().reset_index().transpose().iloc[:, 0].to_dict()
-            except ValueError:
-                break  # silently stops here if no possible next step is found
-            path["t" + str(len(path))] = {"REL": triple["REL"], "STR": triple["STR1"]}
-=======
     path_dataset = {}
     path_id = 0
     for _, sample in triple_dataset_pathselect.iterrows():
         triple = sample.to_dict()
         cui_path = [triple["CUI1"]]
-        path_len = choice(range(3, max_path_len)) if max_path_len > 3 else max_path_len
         path = {"t0": {k: triple[k] for k in ("STR2", "REL", "STR1")}}
-        while len(path) < path_len:
+        while len(path) < max_path_len:
             prev_cui = triple["CUI1"]
             cui_path.append(prev_cui)
             possible_next_steps = triple_dataset_pathselect[
@@ -383,7 +311,6 @@ def build_path_dataset(triple_dataset, size, max_path_len):
                     break
             else:
                 path["t" + str(len(path))] = {"REL": triple["REL"], "STR": triple["STR1"]}
->>>>>>> 6211feff8d77fa098aa174743f8f6ba9ad8721a3
         if len(path) > 1:
             path_dataset[path_id] = path
             path_id += 1
@@ -397,50 +324,21 @@ def main(args):
     warnings.filterwarnings("ignore", category=pd.errors.DtypeWarning)
     subdir_stem = args.lang.lower() + "_v"
     datagen_version = 0
-<<<<<<< HEAD
-    while subdir_stem + str(datagen_version) in os.listdir(args.write):
-        datagen_version += 1
-    subdir = subdir_stem + str(datagen_version)
-    write_dir = os.path.join(args.write, subdir)
-=======
     while subdir_stem + str(datagen_version) in os.listdir(args.writepath):
         datagen_version += 1
     subdir = subdir_stem + str(datagen_version)
     write_dir = os.path.join(args.writepath, subdir)
->>>>>>> 6211feff8d77fa098aa174743f8f6ba9ad8721a3
     os.mkdir(write_dir)
     if args.load_base_tables is None:
         mrconso_ref, mrconso_other, mrrel = build_metathesaurus_tables(
             args.umls_dir, args.srdef, args.sg, lang=args.lang
         )
-        if args.save_base_tables:
-            bt_dir = os.path.join(write_dir, "base_metathesaurus_tables")
-            os.mkdir(bt_dir)
-            mrconso_ref.to_csv(os.path.join(bt_dir, "concept_ref.tsv"), sep="\t")
-            mrconso_other.to_csv(os.path.join(bt_dir, "concepts.tsv"), sep="\t", index=False)
-            mrrel.to_csv(os.path.join(bt_dir, "relations.tsv"), sep="\t", index=False)
+        bt_dir = os.path.join(write_dir, "base_metathesaurus_tables")
+        os.mkdir(bt_dir)
+        mrconso_ref.to_csv(os.path.join(bt_dir, "concept_ref.tsv"), sep="\t")
+        mrconso_other.to_csv(os.path.join(bt_dir, "concepts.tsv"), sep="\t", index=False)
+        mrrel.to_csv(os.path.join(bt_dir, "relations.tsv"), sep="\t", index=False)
     else:
-<<<<<<< HEAD
-        kwargs = dict(sep="\t", engine="pyarrow", dtype_backend="pyarrow") 
-        mrconso_ref = pd.read_csv(os.path.join(args.load_base_tables, "concept_ref.tsv"), index_col="CUI", **kwargs)
-        mrconso_other = pd.read_csv(os.path.join(args.load_base_tables, "concepts.tsv"), **kwargs)
-        mrrel = pd.read_csv(os.path.join(args.load_base_tables, "relations.tsv"), **kwargs)
-    
-    print(f"Writing to {write_dir}...")
-    triple_dataset = build_triple_dataset(mrrel, mrconso_ref, mrconso_other, size=args.n_samples_base)
-    if not args.paths_only:
-        print(f"Triple dataset for entity prediction: n={args.n_samples}")
-        triple_dataset.sample(args.n_samples).to_csv(os.path.join(write_dir, "triples.tsv"), sep="\t", index=False)
-        triple_dataset.to_csv(os.path.join(write_dir, "triples.tsv"), sep="\t", index=False)
-        triple_classification_dataset = build_triple_classification_dataset(triple_dataset, mrconso_ref, mrrel, size=args.n_samples)
-        print(f"Triple dataset for classification: n={len(triple_classification_dataset)}")
-        triple_classification_dataset.to_csv(os.path.join(write_dir, "triple_clf.tsv"), sep="\t", index=False)
-
-    path_dataset = build_path_dataset(triple_dataset, args.n_samples, args.max_path_len)
-    print(f"Path dataset for link prediction: n={len(path_dataset)}")
-    with open(os.path.join(write_dir, "paths.json"), "w") as f:
-        json.dump(path_dataset, f)
-=======
         kwargs = {"sep": "\t", "engine": "pyarrow", "dtype_backend": "pyarrow"}
         mrconso_ref = pd.read_csv(
             os.path.join(args.load_base_tables, "concept_ref.tsv"),
@@ -456,26 +354,23 @@ def main(args):
     triple_dataset = build_triple_dataset(
         mrrel, mrconso_ref, mrconso_other, size=args.n_samples_base
     )
-    if not args.paths_only:
-        print(f"Triple dataset for entity prediction: n={args.n_samples}")
-        triple_dataset.sample(args.n_samples) \
-            .to_csv(os.path.join(write_dir, "triples.tsv"), sep="\t", index=False)
-        triple_dataset.to_csv(os.path.join(write_dir, "triples.tsv"), sep="\t", index=False)
-        triple_classification_dataset = build_triple_classification_dataset(
-            triple_dataset, mrconso_ref, mrrel, size=args.n_samples
-        )
-        print(f"Triple dataset for classification: n={len(triple_classification_dataset)}")
-        triple_classification_dataset.to_csv(
-            os.path.join(write_dir, "triple_clf.tsv"), sep="\t", index=False
-        )
-
+    print(f"Triple dataset for entity prediction: n={args.n_samples}")
+    triple_dataset.sample(args.n_samples) \
+        .to_csv(os.path.join(write_dir, "triples.tsv"), sep="\t", index=False)
+    triple_dataset.to_csv(os.path.join(write_dir, "triples.tsv"), sep="\t", index=False)
+    triple_classification_dataset = build_triple_classification_dataset(
+        triple_dataset, mrconso_ref, mrrel, size=args.n_samples
+    )
+    print(f"Triple dataset for classification: n={len(triple_classification_dataset)}")
+    triple_classification_dataset.to_csv(
+        os.path.join(write_dir, "triple_clf.tsv"), sep="\t", index=False
+    )
     path_dataset = build_path_dataset(triple_dataset, args.n_samples, args.max_path_len)
     print(f"Path dataset for link prediction: n={len(path_dataset)}")
     with open(
         os.path.join(write_dir, "paths.json"), "w", encoding=sys.getdefaultencoding()
     ) as f_io:
         json.dump(path_dataset, f_io)
->>>>>>> 6211feff8d77fa098aa174743f8f6ba9ad8721a3
 
 
 if __name__ == "__main__":

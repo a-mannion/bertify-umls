@@ -1,3 +1,5 @@
+"""UMLS-KGI pre-training implementation
+"""
 import os
 import sys
 import json

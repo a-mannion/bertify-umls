@@ -1,3 +1,5 @@
+"""Fine-tune a BERT model on a token classification task!
+"""
 import os
 import sys
 import json
@@ -70,9 +72,16 @@ input text have been labelled"""
 AUTH_HELP = """Authorisation token for loading a model from the HuggingFace hub, if
 required"""
 NOSAVE_HELP = """Doesn't write anything to disk - can be useful for debugging"""
+TKN_SENT_HELP = """Tells the tokenizer to consider individual strings in the input
+dataset to be sentences - most NER datasets will already be formatted as lists
+of individual words/tokens, but use this flag in cases where they aren't"""
+WBW_HELP = """Include this flag when using models implementing slow tokenizers
+that cannot be automatically converted to fast ones - it tells the data loading
+function to align tokens with labels itself instead of using built-in tokenizers
+functionality"""
 PROJ_HELP = """Name of the Weights & Biases project to log progress to"""
-ENT_HELP = """Your Weights & Biases username; if this and/or `wandb_proj` are not provided, the script will run
-locally without logging metrics"""
+ENT_HELP = """Your Weights & Biases username; if this and/or `wandb_proj` are not
+provided, the script will run locally without logging metrics"""
 METRIC_AVG = "micro", "macro", "weighted"
 METRICS = "_precision", "_recall", "_f1"
 
@@ -104,14 +113,16 @@ def parse_arguments():
     parser.add_argument("--add_none", action="store_true", help=ADD_NONE_HELP)
     parser.add_argument("--auth", type=str, help=AUTH_HELP)
     parser.add_argument("--no_save", action="store_true", help=NOSAVE_HELP)
-    parser.add_argument("--tokenize_sentences", action="store_true")
-    parser.add_argument("--wbw_alignment", action="store_true")
+    parser.add_argument("--tokenize_sentences", action="store_true", help=TKN_SENT_HELP)
+    parser.add_argument("--wbw_alignment", action="store_true", help=WBW_HELP)
     parser.add_argument("--wandb_proj", type=str, help=PROJ_HELP)
     parser.add_argument("--wandb_entity", type=str, help=ENT_HELP)
     return parser.parse_args()
 
 
 def labels2bio(labels):
+    """Converts a list of strings into BIO labels - essentially just doubles each label
+    except for `none`"""
     res = []
     for label_list in labels:
         prev_label = None
@@ -129,6 +140,8 @@ def labels2bio(labels):
 
 
 def load_ner_data(fp, label_name, text_name, split_into_words):
+    """Returns two equally-sized lists of lists, extracted from the specified
+    .json file"""
     with open(fp, encoding=TEXT_ENC) as f_io:
         dataset = json.load(f_io)
     text, labels = [], []
@@ -143,6 +156,7 @@ def load_ner_data(fp, label_name, text_name, split_into_words):
 
 
 def make_word_ids(input_ids, attn_mask, tokenizer, text_):
+    """Workaround method for slow tokenizers"""
     word_ids = [None]  # sequence will always start with cls
     current_id = 0
     for ii, attn in zip(input_ids[1:], attn_mask[1:]):
@@ -162,6 +176,8 @@ def make_word_ids(input_ids, attn_mask, tokenizer, text_):
 
 
 def tokenize_and_align(text, labels, tokenizer, label2id, is_split_into_words, manual_word_ids=False):
+    """Runs tokenisation on the given text and aligns the target labels with the resulting
+    subword identifiers """
     input_encoding = tokenizer(
         text,
         truncation=True,
@@ -400,10 +416,10 @@ if __name__ == "__main__":
     logger = logging.getLogger(__name__)
     logging.basicConfig(format=LOGFMT, datefmt="%d/%m/%Y %H:%M:%S", level=logging.INFO)
     filterwarnings(action="ignore", category=UserWarning)
-    args = parse_arguments()
-    use_wandb = args.wandb_proj and args.wandb_entity
-    if use_wandb:
-        with wandb.init(project=args.wandb_proj, entity=args.wandb_entity, config=vars(args)):
-            main(args, use_wandb)
+    args_ = parse_arguments()
+    use_wandb_ = args_.wandb_proj and args_.wandb_entity
+    if use_wandb_:
+        with wandb.init(project=args_.wandb_proj, entity=args_.wandb_entity, config=vars(args_)):
+            main(args_, use_wandb_)
     else:
-        main(args, use_wandb)
+        main(args_, use_wandb_)

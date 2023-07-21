@@ -1,3 +1,5 @@
+"""Helper functions and classes for processing the mixed-objective `BERTified` UMLS datasets
+"""
 import os
 import re
 import sys
@@ -16,6 +18,7 @@ from transformers import AutoTokenizer, BatchEncoding, PreTrainedTokenizerFast
 TEXT_ENC = sys.getdefaultencoding()
 
 class Bunch:
+    """Basic container that helps with training script readability"""
     _acceptable_types = float, int, bool, type(None), str, torch.Tensor
 
     def __init__(self, **kwargs):
@@ -27,6 +30,8 @@ class Bunch:
 
 
 class BatchEncodingDataset(data.Dataset):
+    """Pytorch dataset that unwraps transformers batch encodings to be more easily accessible
+    by data loaders"""
 
     def __init__(self, data_, return_tensors=True):
         super().__init__()
@@ -45,7 +50,7 @@ class BatchEncodingDataset(data.Dataset):
     def __len__(self):
         return len(getattr(self, self._keys[0]))
 
-    def __getitem__(self, item): 
+    def __getitem__(self, item):
         if self.return_tensors:
             return {key: torch.as_tensor(getattr(self, key)[item]) for key in self._keys}
         return {key: getattr(self, key)[item] for key in self._keys}
@@ -53,31 +58,6 @@ class BatchEncodingDataset(data.Dataset):
     def _init_sequences(self, batch_encoding):
         self._keys = tuple(batch_encoding.keys())
         self.__dict__.update(dict(batch_encoding.items()))
-
-
-class BatchShuffleIterator(data.dataloader._MultiProcessingDataLoaderIter):
-
-    def __next__(self):
-        batch = super().__next__()
-        if isinstance(self.loader, BatchShuffleDataLoader):
-            if self.loader.shuffle:
-                # shuffle the sequences within the batch
-                RNG.shuffle(batch, axis=1)
-        return batch
-
-
-class BatchShuffleDataLoader(data.DataLoader):
-
-    def __init__(self, dataset, shuffle, **kwargs):
-        # assume that `dataset` is an ordered BatchEncodingDataset,
-        # and that `kwargs` contains a `collate_fn` parameter set to
-        # some parameterised instance of `smart_batch_mlm_collate_fn`
-        super().__init__(dataset, **kwargs)
-        self.shuffle = shuffle
-
-    def __iter__(self):
-        self.batch_sampler.shuffle()
-        return BatchShuffleIterator(self)
 
 
 def prepare_mixed_dataset(
@@ -91,6 +71,36 @@ def prepare_mixed_dataset(
     add_bert_special_tokens=True,
     shuffle=False
 ):
+    """Main KGI dataset generation function
+    
+    Parameters
+    ----------
+    kb_datadir:
+        Directory containing the dataset (generated using `build_dataset.py`)
+    corpus_fp:
+        Path to the text file to use for MLM
+    tokenizer:
+        Tokenizer instance to use - can also be a path allowing transformers to load
+        a tokenizer
+    load_tokenizer_via_hf:
+        In the casse where `tokenizer` is a string, indicate whether to use the
+        transfomers `AutoTokenizer.from_pretrained` method to load it
+    model_max_length:
+        Maximal sequence length to parameterise the tokenizer - unused if `tokenizer`
+        is passed as an already-instantiated tokenizer object
+    n_text_docs:
+        Number of documents to load from the `corpus_fp` file, which is assumed to be
+        a text file containing documents separated by double line breaks
+    train_set_frac:
+        Proportion of the data to use as a training set (the rest will be used as an
+        eval set to track the loss during training)
+    add_bert_special_tokens:
+        Whether to manually add padding, separation, cls, masking & padding tokens to
+        the tokenizer vocabulary - usually not necessary when using a pre-trained
+        tokenizer
+    shuffle:
+        Randomise the order of the training sequences before BERT-specific processing
+    """
     kb_sequence_dataset = _build_kb_sequence_dataset(kb_datadir, shuffle=shuffle)
     sentences = _load_sentences(corpus_fp, n_text_docs)
     if tokenizer is None:
@@ -163,6 +173,7 @@ def prepare_mixed_dataset(
 
 
 def get_relation_labels(tokenizer, relation_token_ids=None, exclude_relation_types=("[SY]",)):
+    """Helper function for generating training labels for the link prediction task"""
     if not relation_token_ids:
         relation_token_ids = tokenizer.additional_special_tokens_ids[:-1]  # exclude [HREL]
     if exclude_relation_types:
@@ -182,13 +193,18 @@ def mixed_collate_fn(
     return_enc_dicts=False,
     exclude_relation_types=None
 ):
+    """Data collation function to pass to the DataLoader for UMLS-KGI training. This implements
+    `smart batching`, whereby sequences are padded to the maximal length within individual batches
+    instead of fixing a maximum length to apply to the whole dataset; this can result in significant
+    speedups in situations such as these where there's a lot of variation in sequence length"""
+    
     # padding
-    pad_id_mapping = dict(
-        attention_mask=0,
-        token_type_ids=tokenizer.pad_token_type_id,
-        special_tokens_mask=1,
-        input_ids=tokenizer.pad_token_id
-    )
+    pad_id_mapping = {
+        "attention_mask": 0,
+        "token_type_ids": tokenizer.pad_token_type_id,
+        "special_tokens_mask": 1,
+        "input_ids": tokenizer.pad_token_id
+    }
     max_len = max(len(b["input_ids"]) for b in batch_examples)
     for batch_ex in batch_examples:
         for k, data_val in batch_ex.items():

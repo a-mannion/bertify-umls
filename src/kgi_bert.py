@@ -1,3 +1,5 @@
+"""Model classes for UMLS-KGI-BERT training
+"""
 import os
 import sys
 import json
@@ -38,6 +40,7 @@ class LMHead(torch.nn.Module):
 
 
 class ClassificationHead(torch.nn.Module):
+    """Standard linear classifier"""
 
     def __init__(self, dim, output_size, dropout_size):
         super().__init__()
@@ -53,6 +56,10 @@ class ClassificationHead(torch.nn.Module):
 
 
 class KgiLMBert(PreTrainedModel):
+    """BERT model wrapper that implements a joint objective function composed of knowledge graph
+    triple classification, link prediction, and entity completion alongside masked language
+    modelling
+    """
 
     def __init__(
         self,
