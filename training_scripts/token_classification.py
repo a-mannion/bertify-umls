@@ -11,6 +11,7 @@ from datetime import datetime
 
 import numpy as np
 import torch
+import wandb
 from torch.utils.data import Dataset
 from torch.optim import AdamW
 from sklearn.metrics import precision_recall_fscore_support
@@ -23,9 +24,11 @@ from transformers import (
     get_constant_schedule,
     set_seed
 )
+from transformers.integrations import WandbCallback
 from datasets import load_dataset
 
-sys.path.append(os.path.join(os.pardir, "src"))
+here, _ = os.path.split(os.path.realpath(__file__))
+sys.path.append(os.path.normpath(os.path.join(here, os.pardir, "src")))
 from data_utils import BatchEncodingDataset
 
 
@@ -37,6 +40,7 @@ test.json files, or a valid argument to pass to datasets.load_dataset, in the ca
 where the hfload option is activated."""
 MODEL_HELP = """Path to a pre-trained PyTorch BERT-style model directory compatible with
 the transformers token classification model."""
+KGI_CP_HELP = """Indicates that `model` is a path to a UMLS-KGI checkpoint"""
 LABEL_NAME_HELP = """The target class variable name in the dataset specified by data_fp
 """
 TEXT_NAME_HELP = """The name of the text component in the input data file"""
@@ -54,6 +58,8 @@ SEED_HELP = """Sets the base random state for the script, including the generati
 of seeds for multiple runs"""
 EVAL_SPLIT_NAME_HELP = """The name of the evaluation split in the input dataset
 (this can vary - 'val', 'validation', 'dev', etc. - depending on the dataset)"""
+FILTER_LABELS_HELP = """If the dataset folder contains a file called `labels_to_use.txt`,
+restrict the classification problem to only the class labels therein"""
 SKIP_TEST_HELP = """Only run the training loop on the train & dev sets; for
 debugging etc."""
 HFLOAD_HELP = """Use the Huggingface datasets library to load the input dataset"""
@@ -63,6 +69,10 @@ become class 0 in the collated input labels - for when not all of the tokens in 
 input text have been labelled"""
 AUTH_HELP = """Authorisation token for loading a model from the HuggingFace hub, if
 required"""
+NOSAVE_HELP = """Doesn't write anything to disk - can be useful for debugging"""
+PROJ_HELP = """Name of the Weights & Biases project to log progress to"""
+ENT_HELP = """Your Weights & Biases username; if this and/or `wandb_proj` are not provided, the script will run
+locally without logging metrics"""
 METRIC_AVG = "micro", "macro", "weighted"
 METRICS = "_precision", "_recall", "_f1"
 
@@ -71,6 +81,7 @@ def parse_arguments():
     parser = ArgumentParser()
     parser.add_argument("data_fp", type=str, help=DATA_FP_HELP)
     parser.add_argument("model", type=str, help=MODEL_HELP)
+    parser.add_argument("--from_kgi_checkpoint", action="store_true", help=KGI_CP_HELP)
     parser.add_argument("--label_name", type=str, default="pos_tag", help=LABEL_NAME_HELP)
     parser.add_argument("--text_name", type=str, default="text", help=TEXT_NAME_HELP)
     parser.add_argument("--seq_len", type=int, default=512, help=SEQ_LEN_HELP)
@@ -86,14 +97,17 @@ def parse_arguments():
     parser.add_argument("--seed", type=int, default=42, help=SEED_HELP)
     parser.add_argument("--eval_split_name", type=str, default="validation",
         help=EVAL_SPLIT_NAME_HELP)
+    parser.add_argument("--filter_labels", action="store_true", help=FILTER_LABELS_HELP)
     parser.add_argument("--skip_test", action="store_true", help=SKIP_TEST_HELP)
     parser.add_argument("--hfload", action="store_true", help=HFLOAD_HELP)
     parser.add_argument("--bio", action="store_true", help=BIO_HELP)
     parser.add_argument("--add_none", action="store_true", help=ADD_NONE_HELP)
     parser.add_argument("--auth", type=str, help=AUTH_HELP)
-    parser.add_argument("--no_save", action="store_true")
+    parser.add_argument("--no_save", action="store_true", help=NOSAVE_HELP)
     parser.add_argument("--tokenize_sentences", action="store_true")
     parser.add_argument("--wbw_alignment", action="store_true")
+    parser.add_argument("--wandb_proj", type=str, help=PROJ_HELP)
+    parser.add_argument("--wandb_entity", type=str, help=ENT_HELP)
     return parser.parse_args()
 
 
@@ -189,14 +203,14 @@ def tokenize_and_align(text, labels, tokenizer, label2id, is_split_into_words, m
     return input_encoding
 
 
-def main(args):
+def main(args, use_wandb):
     logger.info("Loading dataset from %s", args.data_fp)
     if args.hfload:
         train_data = load_dataset(args.data_fp, split="train")
         dev_data = load_dataset(args.data_fp, split=args.eval_split_name)
-        text_key = args.hfload_text_name if args.hfload_text_name is not None else "tokens"
-        train_text, train_labels = train_data[text_key], train_data[args.label_name]
-        dev_text, dev_labels = dev_data[text_key], dev_data[args.label_name]
+        # text_key = args.hfload_text_name if args.hfload_text_name is not None else "tokens"
+        train_text, train_labels = train_data["tokens"], train_data[args.label_name]
+        dev_text, dev_labels = dev_data["tokens"], dev_data[args.label_name]
     else:
         train_data, dev_data = map(
             lambda x: load_ner_data(
@@ -215,6 +229,10 @@ def main(args):
         for label in labelset:
             if label not in label_values and label != "none":
                 label_values.append(label)
+    if args.filter_labels and os.path.isfile(os.path.join(args.data_fp, "labels_to_use.txt")):
+        with open(os.path.join(args.data_fp, "labels_to_use.txt"), encoding=TEXT_ENC) as f_io:
+            labels_to_use = set(f_io.read().split("\n"))
+        label_values = list(set(label_values).intersection(labels_to_use))
     label_values.sort()
     labels_are_strings = any(isinstance(val, str) for val in label_values)
     if labels_are_strings:
@@ -240,6 +258,9 @@ def main(args):
     logger.info("Model setup...")
     if args.auth is not None:
         model_init_kwargs.update({"use_auth_token": args.auth, "trust_remote_code": True})
+    if args.from_kgi_checkpoint:
+        torch_dict = torch.load(os.path.join(args.model, "pytorch_model.bin"))
+        model_init_kwargs["state_dict"] = {k.replace("transformer.", ""): v for k, v in torch_dict.items()}
     model = AutoModelForTokenClassification.from_pretrained(args.model, **model_init_kwargs)
     tokenizer = AutoTokenizer.from_pretrained(args.model)
     optimizer = AdamW(tuple(model.parameters()), lr=args.lr)
@@ -256,7 +277,6 @@ def main(args):
             is_split_into_words=not args.tokenize_sentences, manual_word_ids=args.wbw_alignment),
         (train_text, dev_text), (train_labels, dev_labels)
     )
-    # import IPython, sys; IPython.embed(); sys.exit(0)
     train_dataset = BatchEncodingDataset(input_encoding_train)
     dev_dataset = BatchEncodingDataset(input_encoding_dev)
 
@@ -276,7 +296,7 @@ def main(args):
                     refs, preds, average=average
                 )
                 for name, val in zip(METRICS, metric_values):
-                    per_sequence_metrics[average + name].append(val)
+                    per_sequence_metrics[average + name].append(0 if np.isnan(val) else val)
         return {k: sum(v) / len(v) for k, v in per_sequence_metrics.items()}
 
     if "/" in args.model:
@@ -328,13 +348,15 @@ def main(args):
             compute_metrics=compute_metrics
         )
         logger.info("Launching training run %d...", run + 1)
+        if not use_wandb:
+            trainer.remove_callback(WandbCallback)
         trainer.train()
 
         if not args.skip_test:
             logger.info("Loading & encoding test dataset...")
             if args.hfload:
                 test_data = load_dataset(args.data_fp, split="test")
-                test_text, test_labels = test_data[text_key], test_data[args.label_name]
+                test_text, test_labels = test_data["tokens"], test_data[args.label_name]
             else:
                 test_text, test_labels = load_ner_data(
                     os.path.join(args.data_fp, "test.json"),
@@ -378,4 +400,10 @@ if __name__ == "__main__":
     logger = logging.getLogger(__name__)
     logging.basicConfig(format=LOGFMT, datefmt="%d/%m/%Y %H:%M:%S", level=logging.INFO)
     filterwarnings(action="ignore", category=UserWarning)
-    main(parse_arguments())
+    args = parse_arguments()
+    use_wandb = args.wandb_proj and args.wandb_entity
+    if use_wandb:
+        with wandb.init(project=args.wandb_proj, entity=args.wandb_entity, config=vars(args)):
+            main(args, use_wandb)
+    else:
+        main(args, use_wandb)

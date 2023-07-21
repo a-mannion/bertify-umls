@@ -1,17 +1,4 @@
 import os
-<<<<<<< HEAD
-import json
-import warnings
-import pandas as pd
-from argparse import ArgumentParser
-from random import choice
-
-
-UMLS_DIR = os.path.join(os.getenv("HOME"), "data", "umls", "2022AB", "META")
-SRDEF_PATH = os.path.join(os.getenv("HOME"), "data", "umls", "semantic_network", "2022AA", "SRDEF")
-SG_PATH = os.path.join(os.getenv("HOME"), "data", "umls", "semantic_network", "semantic_groups.txt")
-WRITE_PATH = os.path.join(os.getenv("HOME"), "mbiolm-proj", "data", "umls")
-=======
 import sys
 import json
 import warnings
@@ -28,7 +15,6 @@ from the UMLS semantic network )"""
 SG_PATH_HELP = """Path to the semantic groups .txt file"""
 WRITE_PATH_HELP = """Directory in which to write the output datasets"""
 
->>>>>>> 6211feff8d77fa098aa174743f8f6ba9ad8721a3
 SRDEF_COLNAMES = "RT", "UI", "STY_or_RL", "STN_or_RTN", "DEF" \
     "EX", "UN", "NH", "ABR", "RIN"
 SEMANTIC_GROUPS_COLNAMES = "Abbrev", "Name", "TUI", "TypeName"

@@ -58,7 +58,7 @@ class KgiLMBert(PreTrainedModel):
         self,
         config,
         from_pretrained=None,
-        state_dict=None, 
+        state_dict=None,
         num_labels_link_pred=6,
         task_weight_coefficients=None,
         triple_clf_dropout=.1,

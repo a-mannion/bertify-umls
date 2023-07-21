@@ -1,0 +1,218 @@
+{
+    "os": "Linux-4.19.0-24-amd64-x86_64-with-glibc2.17",
+    "python": "3.8.15",
+    "heartbeatAt": "2023-07-20T13:09:58.695703",
+    "startedAt": "2023-07-20T13:09:55.846089",
+    "docker": null,
+    "cuda": "8.0.61",
+    "args": [
+        "../../mbiolm-proj/data/meddocan/",
+        "cambridgeltl/SapBERT-UMLS-2020AB-all-lang-from-XLMR",
+        "--label_name",
+        "tag",
+        "--epochs",
+        "1",
+        "--output_dir",
+        "../../mbiolm-proj/ner-runs/",
+        "--batch_size",
+        "8",
+        "--runs",
+        "1"
+    ],
+    "state": "running",
+    "program": "training_scripts/token_classification.py",
+    "codePath": "training_scripts/token_classification.py",
+    "git": {
+        "remote": "https://github.com/ap-mannion/bertify-umls.git",
+        "commit": "b25935c0c9adcde26c1c05cb75dcc9bdbc7fd9a7"
+    },
+    "email": null,
+    "root": "/home/mrim/manniona/bertify-umls/bertify-umls",
+    "host": "lig-gpu1",
+    "username": "manniona",
+    "executable": "/home/mrim/manniona/miniconda3/envs/mbiolm-proj/bin/python",
+    "cpu_count": 16,
+    "cpu_count_logical": 32,
+    "cpu_freq": {
+        "current": 2.2968124999999993,
+        "min": 1200.0,
+        "max": 3000.0
+    },
+    "cpu_freq_per_core": [
+        {
+            "current": 2.297,
+            "min": 1200.0,
+            "max": 3000.0
+        },
+        {
+            "current": 2.297,
+            "min": 1200.0,
+            "max": 3000.0
+        },
+        {
+            "current": 2.294,
+            "min": 1200.0,
+            "max": 3000.0
+        },
+        {
+            "current": 2.297,
+            "min": 1200.0,
+            "max": 3000.0
+        },
+        {
+            "current": 2.294,
+            "min": 1200.0,
+            "max": 3000.0
+        },
+        {
+            "current": 2.297,
+            "min": 1200.0,
+            "max": 3000.0
+        },
+        {
+            "current": 2.299,
+            "min": 1200.0,
+            "max": 3000.0
+        },
+        {
+            "current": 2.297,
+            "min": 1200.0,
+            "max": 3000.0
+        },
+        {
+            "current": 2.296,
+            "min": 1200.0,
+            "max": 3000.0
+        },
+        {
+            "current": 2.297,
+            "min": 1200.0,
+            "max": 3000.0
+        },
+        {
+            "current": 2.297,
+            "min": 1200.0,
+            "max": 3000.0
+        },
+        {
+            "current": 2.297,
+            "min": 1200.0,
+            "max": 3000.0
+        },
+        {
+            "current": 2.296,
+            "min": 1200.0,
+            "max": 3000.0
+        },
+        {
+            "current": 2.297,
+            "min": 1200.0,
+            "max": 3000.0
+        },
+        {
+            "current": 2.297,
+            "min": 1200.0,
+            "max": 3000.0
+        },
+        {
+            "current": 2.297,
+            "min": 1200.0,
+            "max": 3000.0
+        },
+        {
+            "current": 2.297,
+            "min": 1200.0,
+            "max": 3000.0
+        },
+        {
+            "current": 2.296,
+            "min": 1200.0,
+            "max": 3000.0
+        },
+        {
+            "current": 2.297,
+            "min": 1200.0,
+            "max": 3000.0
+        },
+        {
+            "current": 2.293,
+            "min": 1200.0,
+            "max": 3000.0
+        },
+        {
+            "current": 2.297,
+            "min": 1200.0,
+            "max": 3000.0
+        },
+        {
+            "current": 2.295,
+            "min": 1200.0,
+            "max": 3000.0
+        },
+        {
+            "current": 2.297,
+            "min": 1200.0,
+            "max": 3000.0
+        },
+        {
+            "current": 2.297,
+            "min": 1200.0,
+            "max": 3000.0
+        },
+        {
+            "current": 2.297,
+            "min": 1200.0,
+            "max": 3000.0
+        },
+        {
+            "current": 2.295,
+            "min": 1200.0,
+            "max": 3000.0
+        },
+        {
+            "current": 2.297,
+            "min": 1200.0,
+            "max": 3000.0
+        },
+        {
+            "current": 2.297,
+            "min": 1200.0,
+            "max": 3000.0
+        },
+        {
+            "current": 2.297,
+            "min": 1200.0,
+            "max": 3000.0
+        },
+        {
+            "current": 2.295,
+            "min": 1200.0,
+            "max": 3000.0
+        },
+        {
+            "current": 2.297,
+            "min": 1200.0,
+            "max": 3000.0
+        },
+        {
+            "current": 2.297,
+            "min": 1200.0,
+            "max": 3000.0
+        }
+    ],
+    "disk": {
+        "total": 96.53976440429688,
+        "used": 57.756771087646484
+    },
+    "gpu": "GeForce GTX 1080 Ti",
+    "gpu_count": 1,
+    "gpu_devices": [
+        {
+            "name": "GeForce GTX 1080 Ti",
+            "memory_total": 11721506816
+        }
+    ],
+    "memory": {
+        "total": 251.6926612854004
+    }
+}

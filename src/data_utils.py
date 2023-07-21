@@ -16,11 +16,11 @@ from transformers import AutoTokenizer, BatchEncoding, PreTrainedTokenizerFast
 TEXT_ENC = sys.getdefaultencoding()
 
 class Bunch:
+    _acceptable_types = float, int, bool, type(None), str, torch.Tensor
 
-    def __init__(self, dict_=None, **kwargs):
-        if not isinstance(dict_, dict):
-            dict_ = None
-        self.__dict__.update({**dict_, **kwargs})
+    def __init__(self, **kwargs):
+        checked_kwargs = {k: v for k, v in kwargs.items() if isinstance(v, self._acceptable_types)}
+        self.__dict__.update({**checked_kwargs})
 
     def as_dict(self):
         return self.__dict__

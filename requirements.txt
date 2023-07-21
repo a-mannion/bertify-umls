@@ -6,3 +6,4 @@ scikit-learn==1.2.1
 torch==2.0.0
 transformers==4.27.4
 wandb==0.15.3
+sentencepiece==0.1.99

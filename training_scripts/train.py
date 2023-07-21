@@ -21,7 +21,8 @@ from transformers import (
 from torch.utils.data import DataLoader
 from torch.optim import AdamW
 
-sys.path.append(os.path.join(os.pardir, "src"))
+here, _ = os.path.split(os.path.realpath(__file__))
+sys.path.append(os.path.normpath(os.path.join(here, os.pardir, "src")))
 from kgi_bert import KgiLMBert
 from data_utils import (
     Bunch,
@@ -51,13 +52,19 @@ EXCLUDE_TASK_HELP = """Integer argument telling the model to ignore one of the t
 experiments) - 0 for entity prediction, 1 for link prediction and 2 for triple classification"""
 FP16_HELP = """Use 16-bit precision training"""
 CONST_SCHED_HELP = """Use a constant learning rate"""
+AUTOCOEF_HELP = """Automatically weight the loss function components for each sub-task based on the number of 
+available training examples for each one - takes precedence over the values specified in `config_file`"""
 TDO_HELP = """Only update model weights based on the training data - otherwise, the model will  be trained on the
 validation set AFTER the standard training run; use this flag when you intend to continue training the model on
 the same dataset later"""
 NOSAVE_HELP = """Doesn't write anything to disk - can be useful for debugging"""
+PROJ_HELP = """Name of the Weights & Biases project to log progress to"""
+ENT_HELP = """Your Weights & Biases username; if this and/or `wandb_proj` are not provided, the script will run
+locally without logging metrics"""
 
 
 def parse_arguments():
+    """Command line arguments"""
     parser = ArgumentParser()
     parser.add_argument("kg_fp", type=str, help=KG_FP_HELP)
     parser.add_argument("corpus_fp", type=str, help=CORPUS_FP_HELP)
@@ -66,17 +73,17 @@ def parse_arguments():
     parser.add_argument("--from_cp", action="store_true", help=FROM_CP_HELP)
     parser.add_argument("--add_bert_special_tokens", action="store_true", help=ABST_HELP)
     parser.add_argument("--model_run_name", type=str, default="kgi", help=MODEL_RUN_NAME_HELP)
-    here, _ = os.path.split(os.path.realpath(__file__))
     default_config_file = os.path.join(here, "config_files/kgi_config.json")
     parser.add_argument("--config_file", type=str, default=default_config_file, help=CONFIG_FILE_HELP)
     parser.add_argument("--n_text_docs", type=int, help=N_TEXT_DOCS_HELP)
     parser.add_argument("--exclude_task", type=int, choices={0, 1, 2}, help=EXCLUDE_TASK_HELP)
     parser.add_argument("--fp16", action="store_true", help=FP16_HELP)
-    parser.add_argument("--constant_schedule", action="store_true")
-    parser.add_argument("--train_data_only", action="store_true")
-    parser.add_argument("--nosave", action="store_true")
-    parser.add_argument("--wandb_proj", type=str)
-    parser.add_argument("--wandb_entity", type=str)
+    parser.add_argument("--constant_schedule", action="store_true", help=CONST_SCHED_HELP)
+    parser.add_argument("--auto_coef", action="store_true", help=AUTOCOEF_HELP)
+    parser.add_argument("--train_data_only", action="store_true", help=TDO_HELP)
+    parser.add_argument("--nosave", action="store_true", help=NOSAVE_HELP)
+    parser.add_argument("--wandb_proj", type=str, help=PROJ_HELP)
+    parser.add_argument("--wandb_entity", type=str, help=ENT_HELP)
     return parser.parse_args()
 
 
@@ -115,7 +122,8 @@ def run_pipeline(config):
         model_max_length=config.seq_len,
         n_text_docs=config.n_text_docs,
         train_set_frac=config.train_set_frac,
-        add_bert_special_tokens=config.add_bert_special_tokens
+        add_bert_special_tokens=config.add_bert_special_tokens,
+        shuffle=True
     )
     rel_token_ids2labels = get_relation_labels(tokenizer)
     collate_fn = partial(mixed_collate_fn, tokenizer=tokenizer, rel_token_ids2labels=rel_token_ids2labels)
@@ -140,16 +148,27 @@ def run_pipeline(config):
             model_config = AutoConfig.from_pretrained(config.model_path, vocab_size=vocab_size)
         
         num_labels_link_pred = len(rel_token_ids2labels)
-        _, task_idx_counts = np.unique(train_dataset.task_type_index, return_counts=True)
-        kg_task_idx_counts = task_idx_counts[:-1]
-        kg_task_idx_counts_sum = kg_task_idx_counts.sum()
-        task_weight_coefficients = (kg_task_idx_counts_sum - kg_task_idx_counts) / (2 * kg_task_idx_counts_sum)
-        task_weight_coefficients[kg_task_idx_counts == 0] = 0
+        if config.auto_coef:
+            _, task_idx_counts = np.unique(train_dataset.task_type_index, return_counts=True)
+            kg_task_idx_counts = task_idx_counts[:-1]
+            kg_task_idx_counts_sum = kg_task_idx_counts.sum()
+            task_weight_coefficients = (kg_task_idx_counts_sum - kg_task_idx_counts) /\
+                (2 * kg_task_idx_counts_sum)
+            task_weight_coefficients[kg_task_idx_counts == 0] = 0
+        else:
+            task_weight_coefficients = np.fromiter(
+                (config.__dict__["task_coef" + str(i)] for i in range(3)),
+                dtype=np.float32
+            )
         if config.exclude_task is not None:
-            # in case the sequences corresponding to the task to be ignored have not been excluded from the
-            # input dataset
+            # in case the sequences corresponding to the task to be ignored have not been
+            # excluded from the input dataset
             task_weight_coefficients[config.exclude_task] = 0
-        model = KgiLMBert(model_config, num_labels_link_pred=num_labels_link_pred, task_weight_coefficients=task_weight_coefficients.tolist())
+        model = KgiLMBert(
+            model_config,
+            num_labels_link_pred=num_labels_link_pred,
+            task_weight_coefficients=task_weight_coefficients.tolist()
+        )
     optimizer = AdamW(tuple(model.parameters()), lr=config.learning_rate)
     if config.from_cp:
         optimizer_state_dict = torch.load(os.path.join(config.model_path, "optimizer.bin"))
@@ -217,17 +236,17 @@ def run_pipeline(config):
                     exception
                 )
 
-    if not config.no_wandb:
+    wandb_active = isinstance(config, wandb.sdk.wandb_config.Config)
+    if wandb_active:
         wandb.watch(model, log_freq=config.wandb_log_freq)
         setup_metric_step_axes()
     eval_loss_list = []
     n_examples_train, n_examples_eval = 0, 0
     for epoch in range(config.epochs):
         model.train()
-        if not config.no_wandb:
+        if wandb_active:
             wandb.log({"epoch": epoch})
         for idx, batch in enumerate(train_dataloader):
-            # import IPython, sys; IPython.embed(); sys.exit(0)
             with accelerator.accumulate(model):
                 outputs = model(**batch)
                 loss = outputs.loss
@@ -236,9 +255,9 @@ def run_pipeline(config):
                 optimizer.step()
                 scheduler.step()
                 optimizer.zero_grad()
-            if not config.no_wandb and idx % config.wandb_log_freq == 0:
+            if wandb_active and idx % config.wandb_log_freq == 0:
                 loss_ = loss.detach().item()
-                metrics_to_log = dict(train_step=n_examples_train, train_loss=loss_)
+                metrics_to_log = {"train_step": n_examples_train, "train_loss": loss_}
                 wandb.log(metrics_to_log)
 
         model.eval()
@@ -250,8 +269,8 @@ def run_pipeline(config):
             if np.isnan(loss_val):  # usually underflow afaik
                 loss_val = 1e-6
             n_examples_eval += config.batch_size
-            if not config.no_wandb and idx % config.wandb_log_freq == 0:
-                metrics_to_log = dict(eval_step=n_examples_eval, eval_loss=loss_val)
+            if wandb_active and idx % config.wandb_log_freq == 0:
+                metrics_to_log = {"eval_step": n_examples_eval, "eval_loss": loss_val}
                 wandb.log(metrics_to_log)
             batch_eval_loss.append(loss_val)
         epoch_eval_loss = sum(batch_eval_loss) / len(batch_eval_loss)
@@ -285,22 +304,11 @@ def run_pipeline(config):
         with open(
             os.path.join(output_fp, "eval_loss_by_epoch.json"), "w", encoding=TEXT_ENC
         ) as f_io:
-            json.dump(dict(loss=eval_loss_list), f_io)
+            json.dump({"loss": eval_loss_list}, f_io)
     logger.info("Done!")
 
 
 def main(args):
-    if not args.no_wandb:
-        # login to wandb server
-        with open(
-            os.path.join(os.getenv("HOME"), "mbiolm-proj/wandb-key.txt"),
-            encoding=TEXT_ENC
-        ) as f_io:
-            key = f_io.read()
-        wandb_binary = os.path.join(os.getenv("HOME"), "miniconda3/envs/mbiolm-proj/bin/wandb") 
-        login_cmd = wandb_binary + " login --cloud --relogin " + key
-        os.system(login_cmd)
-
     # config setup
     with open(args.config_file, encoding=TEXT_ENC) as f_io:
         config = {**vars(args), **json.load(f_io)}
@@ -312,7 +320,7 @@ def main(args):
             run_pipeline(config)
     else:
         logger.info("Launching training...")
-        config = Bunch(config)
+        config = Bunch(**config)
         run_pipeline(config)
 
 
