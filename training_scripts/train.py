@@ -39,11 +39,12 @@ LOGFMT = "%(asctime)s - %(levelname)s - \t%(message)s"
 KG_FP_HELP = """Path to the KGI dataset, as created by the `build_dataset` script"""
 CORPUS_FP_HELP = """Path to a text file containing the training corpus for the
 masked-language task"""
-MODEL_PATH_HELP = """BERT encoder to use - must be a compatible argument for the
-`from_pretrained` method of a `transformers` pretrained model"""
+MODEL_PATH_HELP = """BERT encoder to use - can be a pre-trained checkpoint"""
 TOKENIZER_PATH_HELP = """Tokenizer to use, if different from the one specified by
 `model_path`"""
 FROM_CP_HELP = """Include this flag when continuing training from a local UMLS-KGI checkpoint"""
+FROM_SCRATCH_HELP = """Include this flag to use only the model config to instantiate the transformer,
+i.e. randomly initialise the weights to train from scratch"""
 ABST_HELP = """Manually add padding, masking, and separation tokens to the tokenizer during 
 data preprocessing"""
 MODEL_RUN_NAME_HELP = """Name to use for the output directory"""
@@ -73,6 +74,7 @@ def parse_arguments():
     parser.add_argument("model_path", type=str, help=MODEL_PATH_HELP)
     parser.add_argument("--tokenizer_path", type=str, help=TOKENIZER_PATH_HELP)
     parser.add_argument("--from_cp", action="store_true", help=FROM_CP_HELP)
+    parser.add_argument("--from_scratch", action="store_true", help=FROM_SCRATCH_HELP)
     parser.add_argument("--add_bert_special_tokens", action="store_true", help=ABST_HELP)
     parser.add_argument("--model_run_name", type=str, default="kgi", help=MODEL_RUN_NAME_HELP)
     default_config_file = os.path.join(here, "config_files/kgi_config.json")
@@ -141,13 +143,7 @@ def run_pipeline(config):
             vocab_size = tokenizer.get_vocab_size()
         except AttributeError:
             vocab_size = len(tokenizer.get_vocab())
-        if os.path.isfile(config.model_path):
-            with open(config.model_path, encoding=TEXT_ENC) as f:
-                config_dict = json.load(f)
-            config_dict["vocab_size"] = vocab_size
-            model_config = DistilBertConfig(**config_dict)
-        else:
-            model_config = AutoConfig.from_pretrained(config.model_path, vocab_size=vocab_size)
+        model_config = AutoConfig.from_pretrained(config.model_path, vocab_size=vocab_size)
         
         num_labels_link_pred = len(rel_token_ids2labels)
         if config.auto_coef:
@@ -168,6 +164,7 @@ def run_pipeline(config):
             task_weight_coefficients[config.exclude_task] = 0
         model = KgiLMBert(
             model_config,
+            from_pretrained=config.model_path if not config.from_scratch else None,
             num_labels_link_pred=num_labels_link_pred,
             task_weight_coefficients=task_weight_coefficients.tolist()
         )
