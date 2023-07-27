@@ -9,7 +9,7 @@ The code in this repository accompanies the paper "UMLS-KGI-BERT: Data-Centric K
 
 Details on how to parameterise the scripts can be obtained by running them with the `-h` flag.
 
-Paper citation:
+Paper citations:
 ```
 @inproceedings{mannion-etal-2023-umls,
     title = "{UMLS}-{KGI}-{BERT}: Data-Centric Knowledge Integration in Transformers for Biomedical Entity Recognition",
@@ -24,5 +24,15 @@ Paper citation:
     url = "https://aclanthology.org/2023.clinicalnlp-1.35",
     pages = "312--322",
     abstract = "Pre-trained transformer language models (LMs) have in recent years become the dominant paradigm in applied NLP. These models have achieved state-of-the-art performance on tasks such as information extraction, question answering, sentiment analysis, document classification and many others. In the biomedical domain, significant progress has been made in adapting this paradigm to NLP tasks that require the integration of domain-specific knowledge as well as statistical modelling of language. In particular, research in this area has focused on the question of how best to construct LMs that take into account not only the patterns of token distribution in medical text, but also the wealth of structured information contained in terminology resources such as the UMLS. This work contributes a data-centric paradigm for enriching the language representations of biomedical transformer-encoder LMs by extracting text sequences from the UMLS.This allows for graph-based learning objectives to be combined with masked-language pre-training. Preliminary results from experiments in the extension of pre-trained LMs as well as training from scratch show that this framework improves downstream performance on multiple biomedical and clinical Named Entity Recognition (NER) tasks. All pre-trained models, data processing pipelines and evaluation scripts will be made publicly available.",
+}
+```
+```
+@misc{mannion2023umlskgibert,
+      title={UMLS-KGI-BERT: Data-Centric Knowledge Integration in Transformers for Biomedical Entity Recognition}, 
+      author={Aidan Mannion and Thierry Chevalier and Didier Schwab and Lorraine Geouriot},
+      year={2023},
+      eprint={2307.11170},
+      archivePrefix={arXiv},
+      primaryClass={cs.CL}
 }
 ```
