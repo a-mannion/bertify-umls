@@ -8,12 +8,19 @@ from functools import partial
 from collections import defaultdict
 from string import punctuation
 from random import sample
+from typing import Union, Optional, List, Tuple, Type, Dict, Callable
 
 import torch
 from torch.utils import data
-from pandas import read_csv
-from numpy.random import Generator as RNG
-from transformers import AutoTokenizer, BatchEncoding, PreTrainedTokenizerFast
+from pandas import read_csv, DataFrame
+from transformers import (
+    AutoConfig,
+    AutoModel,
+    AutoTokenizer,
+    BatchEncoding,
+    PreTrainedModel,
+    PreTrainedTokenizerFast
+)
 
 TEXT_ENC = sys.getdefaultencoding()
 
@@ -24,6 +31,12 @@ class Bunch:
     def __init__(self, **kwargs):
         checked_kwargs = {k: v for k, v in kwargs.items() if isinstance(v, self._acceptable_types)}
         self.__dict__.update({**checked_kwargs})
+
+    def __getattr__(self, name):
+        try:
+            return self.__dict__[name]
+        except KeyError:
+            return None
 
     def as_dict(self):
         return self.__dict__
@@ -60,17 +73,94 @@ class BatchEncodingDataset(data.Dataset):
         self.__dict__.update(dict(batch_encoding.items()))
 
 
+def load_kgi_tokenizer(
+    name_or_path: Union[str, os.PathLike],
+    add_bert_special_tokens: bool,
+    load_via_hf: bool,
+    relation_tokens: List[str],
+    model_max_length: int
+) -> PreTrainedTokenizerFast:
+    bert_special_tokens = "SEP", "CLS", "UNK", "MASK", "PAD"
+    tokenizer_special_token_kwargs = {
+        t.lower() + "_token": "[" + t + "]" for t in bert_special_tokens
+    } if add_bert_special_tokens else {}
+    if load_via_hf:
+        tokenizer = AutoTokenizer.from_pretrained(
+            name_or_path,
+            model_max_length=model_max_length,
+            **tokenizer_special_token_kwargs
+        )
+    else:
+        tokenizer = PreTrainedTokenizerFast(
+            model_max_length=model_max_length,
+            padding_side="right",
+            truncation_side="right",
+            tokenizer_file=name_or_path,
+            **tokenizer_special_token_kwargs
+        )
+    if relation_tokens:
+        n_tokens_added = tokenizer.add_special_tokens(
+            {"additional_special_tokens": relation_tokens + ["[HREL]"]}
+        )
+        assert n_tokens_added == len(relation_tokens) + 1, \
+            "failed to add all relation tokens"
+    return tokenizer
+
+
+def load_kgi_model_checkpoint(
+    filepath: Union[str, os.PathLike],
+    model_class: Type[PreTrainedModel],
+    transformer_model_attr: str,
+    # remove_key_prefix: bool=True,
+    remove_modules_from_transformer: Optional[List[str]]=None,
+    vocab_size: Optional[int]=None,
+    model_init_kwargs: Optional[dict]=None,
+) -> PreTrainedModel:
+    with open(os.path.join(filepath, "config.json"), encoding=TEXT_ENC) as f_io:
+        config_dict = json.load(f_io)
+    model_type_name = config_dict.pop("_name_or_path")
+    if model_init_kwargs:
+        config_dict.update(model_init_kwargs)
+    try:
+        config_obj = AutoConfig.from_pretrained(model_type_name, **config_dict)
+    except OSError:
+        config_obj = AutoConfig.from_pretrained(
+            os.path.join(os.getenv("HOME"), model_type_name),
+            **config_dict
+        )
+    transformer = AutoModel.from_config(config_obj)
+    torch_dict = torch.load(os.path.join(filepath, "pytorch_model.bin"))
+    transformer_state_dict = {
+        k.replace("transformer.", "", 1): v for k, v in torch_dict.items() \
+            if k.startswith("transformer")
+    }
+    transformer.load_state_dict(transformer_state_dict)
+    if remove_modules_from_transformer:
+        for module_str in remove_modules_from_transformer:
+            setattr(transformer, module_str, None)
+    model = model_class.from_config(config_obj)
+    setattr(model, transformer_model_attr, transformer)
+    if vocab_size:
+        model.resize_token_embeddings(vocab_size)
+    return model
+
+
 def prepare_mixed_dataset(
-    kb_datadir,
-    corpus_fp,
-    tokenizer,
-    load_tokenizer_via_hf,
-    model_max_length,
-    n_text_docs=None,
-    train_set_frac=None,
-    add_bert_special_tokens=True,
-    shuffle=False
-):
+    kb_datadir: Union[str, os.PathLike],
+    corpus_fp: Union[str, os.PathLike],
+    tokenizer: Union[str, os.PathLike, PreTrainedTokenizerFast],
+    load_tokenizer_via_hf: bool,
+    model_max_length: int,
+    n_text_docs: Optional[int]=None,
+    train_set_frac: Optional[float]=None,
+    add_bert_special_tokens: bool=True,
+    shuffle: bool=False
+) -> Union[
+    Tuple[BatchEncodingDataset],
+    Tuple[BatchEncodingDataset, BatchEncodingDataset],
+    Tuple[BatchEncodingDataset, PreTrainedTokenizerFast],
+    Tuple[BatchEncodingDataset, BatchEncodingDataset, PreTrainedTokenizerFast]
+] :
     """Main KGI dataset generation function
     
     Parameters
@@ -107,30 +197,14 @@ def prepare_mixed_dataset(
         return kb_sequence_dataset, sentences
     return_tokenizer = False
     if isinstance(tokenizer, str):
-        bert_special_tokens = "SEP", "CLS", "UNK", "MASK", "PAD"
-        tokenizer_special_token_kwargs = {
-            t.lower() + "_token": "[" + t + "]" for t in bert_special_tokens
-        } if add_bert_special_tokens else {}
         return_tokenizer = True
-        if load_tokenizer_via_hf:
-            tokenizer = AutoTokenizer.from_pretrained(
-                tokenizer,
-                model_max_length=model_max_length,
-                **tokenizer_special_token_kwargs
-            )
-        else:
-            tokenizer = PreTrainedTokenizerFast(
-                model_max_length=model_max_length,
-                padding_side="right",
-                truncation_side="right",
-                tokenizer_file=tokenizer,
-                **tokenizer_special_token_kwargs
-            )
-        n_tokens_added = tokenizer.add_special_tokens(
-            {"additional_special_tokens": kb_sequence_dataset["relation_tokens"] + ["[HREL]"]}
+        tokenizer = load_kgi_tokenizer(
+            tokenizer,
+            add_bert_special_tokens=add_bert_special_tokens,
+            load_via_hf=load_tokenizer_via_hf,
+            relation_tokens=kb_sequence_dataset["relation_tokens"],
+            model_max_length=model_max_length
         )
-        assert n_tokens_added == len(kb_sequence_dataset["relation_tokens"]) + 1, \
-            "failed to add all relation tokens"
     tokenize = partial(tokenizer, return_special_tokens_mask=True, padding=False, truncation=True)
     triple_encoding_entpred = tokenize(kb_sequence_dataset["triples_ep"])
     triple_encoding_clf = tokenize(kb_sequence_dataset["triples_clf"]["text"])
@@ -172,7 +246,11 @@ def prepare_mixed_dataset(
     return dataset
 
 
-def get_relation_labels(tokenizer, relation_token_ids=None, exclude_relation_types=("[SY]",)):
+def get_relation_labels(
+    tokenizer: PreTrainedTokenizerFast,
+    relation_token_ids: Optional[List[int]]=None,
+    exclude_relation_types: Optional[Tuple[str]]=("[SY]",)
+) -> Dict[str, int]:
     """Helper function for generating training labels for the link prediction task"""
     if not relation_token_ids:
         relation_token_ids = tokenizer.additional_special_tokens_ids[:-1]  # exclude [HREL]
@@ -187,12 +265,12 @@ def get_relation_labels(tokenizer, relation_token_ids=None, exclude_relation_typ
 
 
 def mixed_collate_fn(
-    batch_examples,
-    tokenizer,
-    rel_token_ids2labels=None,
-    return_enc_dicts=False,
-    exclude_relation_types=None
-):
+    batch_examples: List[BatchEncoding],
+    tokenizer: PreTrainedTokenizerFast,
+    rel_token_ids2labels: Optional[dict]=None,
+    return_enc_dicts: bool=False,
+    exclude_relation_types: Optional[Tuple[str]]=None
+) -> Union[Tuple[dict], BatchEncoding]:
     """Data collation function to pass to the DataLoader for UMLS-KGI training. This implements
     `smart batching`, whereby sequences are padded to the maximal length within individual batches
     instead of fixing a maximum length to apply to the whole dataset; this can result in significant
@@ -265,7 +343,7 @@ def mixed_collate_fn(
         sentence_ids = torch.stack([s["input_ids"] for s in sentences])
         labels = sentence_ids.clone()
         labels[~mask_idx] = -100
-        sentence_encodings = dict()
+        sentence_encodings = {}
         sentence_encodings["labels"] = labels
         sentence_ids[mask_token_idx] = tokenizer.mask_token_id
         sentence_ids[random_idx] = torch.randint(tokenizer.vocab_size, (random_idx.sum(),))
@@ -297,13 +375,16 @@ def mixed_collate_fn(
     return BatchEncoding(output_dict)
 
 
-def _build_kb_sequence_dataset(dir_, shuffle=False):
+def _build_kb_sequence_dataset(
+    dir_: Union[str, os.PathLike],
+    shuffle: bool=False
+) -> Dict[str, Union[Dict[str, List[str]], List[str]]]:
     punc = re.sub(r"'|\[|\]", "", punctuation)
     clean_f = partial(_entity_text_prep, trans=str.maketrans(punc, " " * len(punc)))
     with open(os.path.join(dir_, "paths.json"), encoding=TEXT_ENC) as f_io:
         path_dataset = json.load(f_io)
     path_sequences = _make_path_sequences(path_dataset, clean_f)
-    kwargs = dict(sep="\t", engine="pyarrow", dtype_backend="pyarrow")
+    kwargs = {"sep": "\t", "engine": "pyarrow", "dtype_backend": "pyarrow"}
     entpred_dataset = read_csv(os.path.join(dir_, "triples.tsv"), **kwargs)
     relation_tokens = entpred_dataset.REL.drop_duplicates().apply(lambda x: f"[{x}]").to_list()
     ep_sequences = _make_triple_sequence_list(entpred_dataset, clean_f)
@@ -325,7 +406,7 @@ def _build_kb_sequence_dataset(dir_, shuffle=False):
     return output_data
 
 
-def _load_sentences(data_fp, n_docs):
+def _load_sentences(data_fp: Union[str, os.PathLike], n_docs: int) -> List[str]:
     with open(data_fp, encoding=TEXT_ENC) as f_io:
         if n_docs is None:
             text = [doc for doc in f_io.read().split("\n")]
@@ -338,7 +419,13 @@ def _load_sentences(data_fp, n_docs):
     return text
 
 
-def _entity_prediction_collation(batch_examples, mask_token_id, relation_token_ids, model_input_names, return_dict=False):
+def _entity_prediction_collation(
+    batch_examples: List[dict],
+    mask_token_id: int,
+    relation_token_ids: List[int],
+    model_input_names: List[str],
+    return_dict: bool=False
+) -> Union[Dict[str, List[torch.Tensor]], BatchEncoding]:
     masked_encoding = defaultdict(list)
     for dict_ in batch_examples:
         labels = dict_["input_ids"].clone()
@@ -363,7 +450,14 @@ def _entity_prediction_collation(batch_examples, mask_token_id, relation_token_i
     return BatchEncoding(masked_encoding)
 
 
-def _link_prediction_collation(batch_examples, mask_token_id, relation_token_ids, model_input_names, rel_token_ids2labels, return_dict=False):
+def _link_prediction_collation(
+    batch_examples: List[dict],
+    mask_token_id: int,
+    relation_token_ids: List[int],
+    model_input_names: List[str],
+    rel_token_ids2labels: Dict[int, int],
+    return_dict: bool=False
+) -> Union[Dict[str, List[torch.Tensor]], BatchEncoding]:
     masked_encoding = defaultdict(list)
     for dict_ in batch_examples:
         labels = dict_["input_ids"].clone()
@@ -380,7 +474,11 @@ def _link_prediction_collation(batch_examples, mask_token_id, relation_token_ids
     return BatchEncoding(masked_encoding)
 
 
-def _make_mlm_masks(input_shape, prob, special_tokens_mask):
+def _make_mlm_masks(
+    input_shape: Tuple[int],
+    prob: float,
+    special_tokens_mask: torch.Tensor
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     probs = torch.full(input_shape, prob)
     probs.masked_fill_(special_tokens_mask, value=0.)
     mask_idx = probs.bernoulli().bool()
@@ -389,11 +487,11 @@ def _make_mlm_masks(input_shape, prob, special_tokens_mask):
     return mask_idx, mask_token_idx, random_idx
 
 
-def _entity_text_prep(text, trans):
+def _entity_text_prep(text: str, trans: dict) -> str:
     return re.sub(r"\s+", " ", text.translate(trans)).strip()
 
 
-def _make_path_sequences(dict_, clean_f):
+def _make_path_sequences(dict_: dict, clean_f: Callable) -> List[str]:
     sequences = []
     for path in dict_.values():
         seq = " ".join(list(clean_f(v) if k != "REL" else f"[{v}]" for k, v in path["t0"].items()))
@@ -405,7 +503,7 @@ def _make_path_sequences(dict_, clean_f):
     return sequences
 
 
-def _make_triple_sequence_list(dataset, clean_f):
+def _make_triple_sequence_list(dataset: DataFrame, clean_f: Callable) -> List[str]:
     res = dataset.STR2.apply(clean_f) + dataset.REL.apply(lambda x: f" [{x}] ") + \
         dataset.STR1.apply(clean_f)
     return res.to_list()

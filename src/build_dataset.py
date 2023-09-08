@@ -15,8 +15,8 @@ import os
 import sys
 import json
 import warnings
-from argparse import ArgumentParser
-from random import choice
+from argparse import ArgumentParser, Namespace
+from typing import Union, Dict, Tuple, Optional
 
 import pandas as pd
 
@@ -63,7 +63,8 @@ EXCLUDE_SEMANTIC_TYPES = "Plant", "Fungus", "Animal", "Vertebrate", \
     "Language", "Eukaryote"
 
 
-def parse_arguments():
+def parse_arguments() -> Namespace:
+    """Command line parser"""
     parser = ArgumentParser()
     parser.add_argument("umls_dir", type=str, help=UMLS_DIR_HELP)
     parser.add_argument("srdef", type=str, help=SRDEF_PATH_HELP)
@@ -77,7 +78,15 @@ def parse_arguments():
     return parser.parse_args()
 
 
-def build_metathesaurus_tables(umls_path, srdef_path, sg_path, filter_types=True, lang=None, chunksize=None):
+def build_metathesaurus_tables(
+    umls_path: Union[str, os.PathLike],
+    srdef_path: Union[str, os.PathLike],
+    sg_path: Union[str, os.PathLike],
+    filter_types: bool=True,
+    lang: Optional[str]=None,
+    chunksize: Optional[int]=None
+) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    """Load and process data from the standard UMLS download"""
     # load SRDEF: base table for info about semantic types
     srdef_usenames = ["RT", "UI", "STY_or_RL"]
     srdef = pd.read_csv(
@@ -169,7 +178,14 @@ def build_metathesaurus_tables(umls_path, srdef_path, sg_path, filter_types=True
     return mrconso_ref, mrconso_other, mrrel.reset_index(drop=True)
 
 
-def build_triple_dataset(mrrel, mrconso_ref, mrconso_other, size=None, stratify_sg=True):
+def build_triple_dataset(
+    mrrel: pd.DataFrame,
+    mrconso_ref: pd.DataFrame,
+    mrconso_other: pd.DataFrame,
+    size: Optional[int]=None,
+    stratify_sg: bool=True
+) -> pd.DataFrame:
+    """Construct the base dataset of KG triples"""
     if not size:
         size = len(mrrel)
     if stratify_sg:
@@ -226,7 +242,13 @@ def build_triple_dataset(mrrel, mrconso_ref, mrconso_other, size=None, stratify_
     return dataset
 
 
-def build_triple_classification_dataset(triple_dataset, mrconso_ref, mrrel, size=None):
+def build_triple_classification_dataset(
+    triple_dataset: pd.DataFrame,
+    mrconso_ref: pd.DataFrame,
+    mrrel: pd.DataFrame,
+    size: Optional[int]=None
+) -> pd.DataFrame:
+    """Sample from the base dataset to create a dataset of triples with binary true/false labels"""
     triple_sample = triple_dataset.sample(size) if size else triple_dataset
     triple_sample["clf_label"] = [1 for _ in range(len(triple_sample))]
     sg_sample_sizes = triple_sample[["SG2"]].reset_index(drop=False).groupby("SG2") \
@@ -287,7 +309,12 @@ def build_triple_classification_dataset(triple_dataset, mrconso_ref, mrrel, size
     return triple_sample.sample(frac=1.)
 
 
-def build_path_dataset(triple_dataset, size, max_path_len):
+def build_path_dataset(
+    triple_dataset: pd.DataFrame,
+    size: int,
+    max_path_len: int
+) -> Dict[str, Dict[str, str]]:
+    """Constructs a dataset of `semantic paths` for the link prediction subtask"""
     triple_dataset_pathselect = triple_dataset[triple_dataset.REL != "SY"]
     path_dataset = {}
     path_id = 0
@@ -319,7 +346,7 @@ def build_path_dataset(triple_dataset, size, max_path_len):
     return path_dataset
 
 
-def main(args):
+def main(args: Namespace) -> None:
     warnings.filterwarnings("ignore", category=pd.errors.SettingWithCopyWarning)
     warnings.filterwarnings("ignore", category=pd.errors.DtypeWarning)
     subdir_stem = args.lang.lower() + "_v"

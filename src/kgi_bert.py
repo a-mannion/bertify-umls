@@ -87,11 +87,17 @@ class KgiLMBert(PreTrainedModel):
         self.task_weight_coefficients = [0.5] * 3 if task_weight_coefficients is None \
             else task_weight_coefficients
         if from_pretrained:
-            self.transformer = AutoModel.from_pretrained(from_pretrained, state_dict=state_dict)
-            self.config = self.transformer.config
+            self.transformer = AutoModel.from_pretrained(
+                from_pretrained,
+                # config=config,
+                state_dict=state_dict,
+                ignore_mismatched_sizes=True
+            )
+            # embedding input dim will be different because of the relation tokens
+            self.transformer.resize_token_embeddings(config.vocab_size)
         else:
             self.transformer = AutoModel.from_config(config)
-            self.config = config
+        self.config = config
         self.loss_fct = torch.nn.CrossEntropyLoss()
         clf_classes, module_list, nonzero_task_weight_coefficients = [], [], []
 
