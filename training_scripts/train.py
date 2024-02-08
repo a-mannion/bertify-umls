@@ -10,7 +10,6 @@ from argparse import ArgumentParser, Namespace
 from typing import Union
 
 import torch
-import wandb
 import numpy as np
 from accelerate import Accelerator
 from transformers import (
@@ -24,8 +23,9 @@ from transformers import (
 from torch.utils.data import DataLoader
 from torch.optim import AdamW
 
-here, _ = os.path.split(os.path.realpath(__file__))
-sys.path.append(os.path.normpath(os.path.join(here, os.pardir, "src")))
+sys.path.append(
+    os.path.normpath(os.path.join(os.path.dirname(__file__), os.pardir, "src"))
+)
 from kgi_bert import KgiLMBert
 from data_utils import (
     get_relation_labels,
@@ -43,9 +43,9 @@ MODEL_PATH_HELP = """BERT encoder to use - can be a pre-trained checkpoint"""
 TOKENIZER_PATH_HELP = """Tokenizer to use, if different from the one specified by
 `model_path`"""
 FROM_CP_HELP = """Include this flag when continuing training from a local UMLS-KGI checkpoint"""
-FROM_SCRATCH_HELP = """Include this flag to use only the model config to instantiate the transformer,
-i.e. randomly initialise the weights to train from scratch"""
-ABST_HELP = """Manually add padding, masking, and separation tokens to the tokenizer during 
+FROM_SCRATCH_HELP = """Include this flag to use only the model config to instantiate the
+transformer, i.e. randomly initialise the weights to train from scratch"""
+ABST_HELP = """Manually add padding, masking, and separation tokens to the tokenizer during
 data preprocessing"""
 MODEL_RUN_NAME_HELP = """Name to use for the output directory"""
 TRAINSETFRAC_HELP = "Proportion of the input dataset to use for training"
@@ -54,26 +54,22 @@ LR_HELP = "Learning rate to use for optimisation"
 EPOCHS_HELP = "Number of passes to run over the training set"
 GRAD_ACC_HELP = "Number of batches over which to add up gradients between each backward pass"
 LIN_SCHED_EPOCH_HELP = """For cases in which a non-linear learning rate schedule is being spread out
-over multiple runs of this script, use this flag to indicate how many epochs have already been run"""
+over multiple runs of this script, use this flag to indicate how many epochs have already been run
+"""
 SEQ_LEN_HELP = "Maximal number of tokens per training sequence"
 SEED_HELP = "Random seed to use for initialisation"
-TASK_COEFS_HELP = """Floating-point weights for the loss function components corresponding to each KG-based
-task; expects three numbers, the first for entity prediction, the second for link prediction and the third
-for triple classification"""
-CP_INTERVAL_HELP = "Save a checkpoint every n epochs"
-N_TEXT_DOCS_HELP = """Specify a maximum number of documents to load from the `corpus_fp` file; leave unspecified
-to use all of them"""
+TASK_COEFS_HELP = """Floating-point weights for the loss function components corresponding to each
+KG-based task; expects three numbers, the first for entity prediction, the second for link
+prediction, and the third for triple classification"""
+CP_INTERVAL_HELP = "Save a checkpoint every `n` epochs"
+N_TEXT_DOCS_HELP = """Specify a maximum number of documents to load from the `corpus_fp` file;
+leave unspecified to use all of them"""
 FP16_HELP = """Use 16-bit precision training"""
 CONST_SCHED_HELP = """Use a constant learning rate"""
-TDO_HELP = """Only update model weights based on the training data - otherwise, the model will  be trained on the
-validation set AFTER the standard training run; use this flag when you intend to continue training the model on
-the same dataset later"""
+TDO_HELP = """Only update model weights based on the training data - otherwise, the model will be
+trained on the validation set AFTER the standard training run; use this flag when you intend to
+continue training the model on the same dataset later"""
 NOSAVE_HELP = """Doesn't write anything to disk - can be useful for debugging"""
-PROJ_HELP = """Name of the Weights & Biases project to log progress to"""
-ENT_HELP = """Your Weights & Biases username; if this and/or `wandb_proj` are not provided, the script will run
-locally without logging metrics"""
-LOGFREQ_HELP = "Log metrics to W&B after every n batches; if not specified will update after each backward pass"
-TRACKGRAD_HELP = "Log the gradients of the model to Weights & Biases as well as the performance metrics"
 
 
 def parse_arguments() -> Namespace:
@@ -102,14 +98,10 @@ def parse_arguments() -> Namespace:
     parser.add_argument("--constant_schedule", action="store_true", help=CONST_SCHED_HELP)
     parser.add_argument("--train_data_only", action="store_true", help=TDO_HELP)
     parser.add_argument("--nosave", action="store_true", help=NOSAVE_HELP)
-    parser.add_argument("--wandb_proj", type=str, help=PROJ_HELP)
-    parser.add_argument("--wandb_entity", type=str, help=ENT_HELP)
-    parser.add_argument("--wandb_log_freq", type=int, help=LOGFREQ_HELP)
-    parser.add_argument("--track_grad", action="store_true", help=TRACKGRAD_HELP)
     return parser.parse_args()
 
 
-def run_pipeline(config: Union[Namespace, wandb.sdk.Config], logger: logging.Logger) -> None:
+def main(config: Namespace, logger: logging.Logger) -> None:
     # setup
     accelerator = Accelerator(
         mixed_precision="fp16" if config.fp16 else None,
@@ -221,10 +213,10 @@ def run_pipeline(config: Union[Namespace, wandb.sdk.Config], logger: logging.Log
     scheduler = accelerator.prepare(scheduler)
     if config.from_cp:
         accelerator.load_state(config.model_path)
-    logger.info("Accelerator state - %s", accelerator.state.__repr__()[:-1].replace("\n", "; "))
+    logger.info("Accelerator state - %s", repr(accelerator.state)[:-1].replace("\n", "; "))
     logger.info("=== Starting Training Loop ===")
 
-    def save_checkpoint():
+    def _save_checkpoint():
         accelerator.wait_for_everyone()
         cp_dir = os.path.join(output_fp, f"checkpoint_epoch{epoch + 1}")
         if not config.nosave:
@@ -241,75 +233,46 @@ def run_pipeline(config: Union[Namespace, wandb.sdk.Config], logger: logging.Log
                     "Checkpoint could not be saved because of the following error:\n%s",
                     exception
                 )
-
-    wandb_active = isinstance(config, wandb.sdk.wandb_config.Config)
-    if wandb_active:
-        if config.track_grad:
-            wandb.watch(model, log_freq=config.wandb_log_freq if config.wandb_log_freq else 200)
-        
-        # define x-axis for graphs
-        wandb.define_metric("train_step")
-        wandb.define_metric("eval_step")
-        # associate output metrics with the corresponding x-axis metric
-        wandb.define_metric("train_loss", step_metric="train_step")
-        wandb.define_metric("eval_loss", step_metric="eval_step")
-
-        train_step, eval_step = 0, 0  # update counters
-
-        # log function that takes the update counter and loss tensor
-        def wandb_log(loss, train_step):
-            loss_ = loss if isinstance(loss, float) else loss.detach().item()
-            metrics_to_log = {"train_step": train_step, "train_loss": loss_}
-            wandb.log(metrics_to_log)
-
-    eval_loss_list = []
-    for epoch in range(config.epochs):
-        model.train()
-        if wandb_active:
-            wandb.log({"epoch": epoch})
-        for idx, batch in enumerate(train_dataloader):
-            with accelerator.accumulate(model):
-                outputs = model(**batch)
-                loss = outputs.loss
-                accelerator.backward(loss)
-                optimizer.step()
-                scheduler.step()
-                optimizer.zero_grad()
-            if wandb_active:
-                if config.wandb_log_freq is None:
-                    if idx % config.grad_acc == 0 or idx == n_train_batches - 1:
-                        train_step += 1
-                        wandb_log(loss, train_step)
-                elif idx % config.wandb_log_freq == 0:
-                    train_step += 1
-                    wandb_log(loss, train_step)
-
-        model.eval()
-        batch_eval_loss = []
-        for idx, batch in enumerate(eval_dataloader):
-            with torch.no_grad():
-                outputs = model(**batch)
+    
+    def _run_epoch_iteration(mode, artefacts, dataloader, accelerator=None):
+        model, optimizer, scheduler = artefacts
+        if mode == "train":
+            model.train()
+        else:
+            model.eval()
+        batch_loss = []
+        for batch in dataloader:
+            if mode == "train":
+                with accelerator.accumulate(model):
+                    outputs = model(**batch)
+                    accelerator.backward(outputs.loss)
+                    optimizer.step()
+                    scheduler.step()
+                    optimizer.zero_grad()
+            else:
+                with torch.no_grad():
+                    outputs = model(**batch)
             loss_val = outputs.loss.detach().item()
-            batch_eval_loss.append(loss_val)
             if np.isnan(loss_val):  # usually underflow afaik
                 loss_val = 1e-6
-            if wandb_active:
-                if config.wandb_log_freq is None:
-                    if idx % config.grad_acc == 0 or idx == n_train_batches - 1:
-                        eval_step += 1
-                        wandb_log(loss_val, eval_step)
-                elif idx % config.wandb_log_freq == 0:
-                    eval_step += 1
-                    wandb_log(loss_val, eval_step)
-        epoch_eval_loss = sum(batch_eval_loss) / len(batch_eval_loss)
+            batch_loss.append(loss_val)
+        return sum(batch_loss) / len(batch_loss)
+
+    train_loss_list, eval_loss_list = [], []
+    for epoch in range(config.epochs):
+        artefacts = model, optimizer, scheduler
+        epoch_train_loss = _run_epoch_iteration("train", artefacts, train_dataloader, accelerator)
+        train_loss_list.append(epoch_train_loss)
+
+        epoch_eval_loss = _run_epoch_iteration("eval", artefacts, eval_dataloader)
         eval_loss_list.append(epoch_eval_loss)
 
         logger.info(
-            "\tFinished epoch %d - eval. loss = %.5f...",
-            epoch + 1, epoch_eval_loss
+            "\tFinished epoch %d - train loss %.5f, eval loss %.5f",
+            epoch + 1, epoch_train_loss, epoch_eval_loss
         )
         if (epoch + 1) % config.epoch_checkpoint_interval == 0 and epoch != config.epochs - 1:
-            save_checkpoint()
+            _save_checkpoint()
 
     if not config.train_data_only:
         logger.info("Training model on evaluation data...")
@@ -328,7 +291,7 @@ def run_pipeline(config: Union[Namespace, wandb.sdk.Config], logger: logging.Log
     accelerator.wait_for_everyone()
     if not config.nosave:
         logger.info("All processes finished; saving model...")
-        save_checkpoint()
+        _save_checkpoint()
         with open(
             os.path.join(output_fp, "eval_loss_by_epoch.json"), "w", encoding=TEXT_ENC
         ) as f_io:
@@ -336,18 +299,8 @@ def run_pipeline(config: Union[Namespace, wandb.sdk.Config], logger: logging.Log
     logger.info("Done!")
 
 
-def main(args: Namespace, logger: logging.Logger) -> None:
-    if args.wandb_proj and args.wandb_entity:
-        with wandb.init(project=args.wandb_proj, entity=args.wandb_entity, config=vars(args)):
-            logger.info("Launching training with W&B...")
-            run_pipeline(wandb.config, logger)
-    else:
-        logger.info("Launching training...")
-        run_pipeline(args, logger)
-
-
 if __name__ == "__main__":
-    logger = logging.getLogger(__name__)
+    logger_ = logging.getLogger(__name__)
     logging.basicConfig(format=LOGFMT, datefmt="%d/%m/%Y %H:%M:%S", level=logging.INFO)
-    main(parse_arguments(), logger)
+    main(parse_arguments(), logger_)
     

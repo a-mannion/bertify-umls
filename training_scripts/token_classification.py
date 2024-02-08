@@ -14,7 +14,6 @@ from typing import Union, List, Dict, Tuple, Optional
 
 import numpy as np
 import torch
-import wandb
 from torch.utils.data import Dataset
 from torch.optim import AdamW
 from sklearn.metrics import precision_recall_fscore_support
@@ -30,7 +29,6 @@ from transformers import (
     get_constant_schedule_with_warmup,
     set_seed
 )
-from transformers.integrations import WandbCallback
 from datasets import load_dataset
 
 here, _ = os.path.split(os.path.realpath(__file__))
@@ -91,9 +89,6 @@ NOSAVE_HELP = """Doesn't write anything to disk - can be useful for debugging"""
 TKN_SENT_HELP = """Tells the tokenizer to consider individual strings in the input
 dataset to be sentences - most NER datasets will already be formatted as lists
 of individual words/tokens, but use this flag in cases where they aren't"""
-PROJ_HELP = """Name of the Weights & Biases project to log progress to"""
-ENT_HELP = """Your Weights & Biases username; if this and/or `wandb_proj` are not
-provided, the script will run locally without logging metrics"""
 METRIC_AVG = "micro", "macro", "weighted"
 METRICS = "_precision", "_recall", "_f1"
 
@@ -131,8 +126,6 @@ def parse_arguments() -> Namespace:
     parser.add_argument("--auth", type=str, help=AUTH_HELP)
     parser.add_argument("--no_save", action="store_true", help=NOSAVE_HELP)
     parser.add_argument("--tokenize_sentences", action="store_true", help=TKN_SENT_HELP)
-    parser.add_argument("--wandb_proj", type=str, help=PROJ_HELP)
-    parser.add_argument("--wandb_entity", type=str, help=ENT_HELP)
     return parser.parse_args()
 
 
@@ -278,7 +271,7 @@ def tokenize_and_align(
     return input_encoding
 
 
-def main(args: Namespace, use_wandb: bool, logger: logging.Logger) -> None:
+def main(args: Namespace, logger: logging.Logger) -> None:
     if "/" in args.model:
         _, output_name_model = os.path.split(args.model)
     else:
@@ -491,8 +484,6 @@ def main(args: Namespace, use_wandb: bool, logger: logging.Logger) -> None:
             optimizers=(optimizer, scheduler),
             compute_metrics=None if args.no_eval else compute_metrics
         )
-        if not use_wandb:
-            trainer.remove_callback(WandbCallback)
         logger.info("Launching training run %d...", run + 1)
         trainer.train()
 
@@ -544,7 +535,7 @@ def main(args: Namespace, use_wandb: bool, logger: logging.Logger) -> None:
 
 
 if __name__ == "__main__":
-    logger = logging.getLogger(__name__)
+    logger_ = logging.getLogger(__name__)
     logging.basicConfig(
         format=LOGFMT,
         datefmt="%d/%m/%Y %H:%M:%S",
@@ -552,9 +543,4 @@ if __name__ == "__main__":
     )
     filterwarnings(action="ignore", category=UserWarning)
     args_ = parse_arguments()
-    use_wandb_ = args_.wandb_proj and args_.wandb_entity
-    if use_wandb_:
-        with wandb.init(project=args_.wandb_proj, entity=args_.wandb_entity, config=vars(args_)):
-            main(args_, use_wandb_, logger)
-    else:
-        main(args_, use_wandb_, logger)
+    main(args_, logger_)
