@@ -30,7 +30,7 @@ class Bunch:
 
     def __init__(self, **kwargs):
         checked_kwargs = {k: v for k, v in kwargs.items() if isinstance(v, self._acceptable_types)}
-        self.__dict__.update({**checked_kwargs})
+        self.__dict__.update(checked_kwargs)
 
     def __getattr__(self, name):
         try:
