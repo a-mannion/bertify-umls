@@ -377,7 +377,6 @@ def main(args: Namespace, logger: logging.Logger) -> None:
             args.tokenizer_path,
             add_bert_special_tokens=is_local_tokenizer,
             load_via_hf=not is_local_tokenizer,
-            # relation_tokens=REL_TOKENS if is_local_tokenizer else [],
             relation_tokens=[],
             model_max_length=args.seq_len
         )
@@ -386,8 +385,7 @@ def main(args: Namespace, logger: logging.Logger) -> None:
             model_class=AutoModelForTokenClassification,
             transformer_model_attr=args.model_attr,
             remove_modules_from_transformer=["pooler"],
-            vocab_size=tokenizer.get_vocab_size() if hasattr(tokenizer, "get_vocab_size") \
-                else tokenizer.get_vocab().__len__(),
+            vocab_size=len(tokenizer),
             model_init_kwargs=model_init_kwargs
         )
     else:

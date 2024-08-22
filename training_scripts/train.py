@@ -8,6 +8,7 @@ from functools import partial
 from datetime import datetime
 from argparse import ArgumentParser, Namespace
 from typing import Union
+from tqdm import tqdm
 
 import torch
 import numpy as np
@@ -45,7 +46,7 @@ TOKENIZER_PATH_HELP = """Tokenizer to use, if different from the one specified b
 FROM_CP_HELP = """Include this flag when continuing training from a local UMLS-KGI checkpoint"""
 FROM_SCRATCH_HELP = """Include this flag to use only the model config to instantiate the
 transformer, i.e. randomly initialise the weights to train from scratch"""
-ABST_HELP = """Manually add padding, masking, and separation tokens to the tokenizer during
+ABST_HELP = """Add padding, masking, and separation tokens to the tokenizer during
 data preprocessing"""
 MODEL_RUN_NAME_HELP = """Name to use for the output directory"""
 TRAINSETFRAC_HELP = "Proportion of the input dataset to use for training"
@@ -70,6 +71,7 @@ TDO_HELP = """Only update model weights based on the training data - otherwise, 
 trained on the validation set AFTER the standard training run; use this flag when you intend to
 continue training the model on the same dataset later"""
 NOSAVE_HELP = """Doesn't write anything to disk - can be useful for debugging"""
+TQDM_HELP = "Show a progress bar tracking each epoch over the number of batches"
 
 
 def parse_arguments() -> Namespace:
@@ -98,6 +100,7 @@ def parse_arguments() -> Namespace:
     parser.add_argument("--constant_schedule", action="store_true", help=CONST_SCHED_HELP)
     parser.add_argument("--train_data_only", action="store_true", help=TDO_HELP)
     parser.add_argument("--nosave", action="store_true", help=NOSAVE_HELP)
+    parser.add_argument("--pb", action="store_true", help=TQDM_HELP)
     return parser.parse_args()
 
 
@@ -130,6 +133,7 @@ def main(config: Namespace, logger: logging.Logger) -> None:
         add_bert_special_tokens=config.add_bert_special_tokens,
         shuffle=True
     )
+    vocab_size = len(tokenizer)
     rel_token_ids2labels = get_relation_labels(tokenizer)
     collate_fn = partial(mixed_collate_fn, tokenizer=tokenizer, rel_token_ids2labels=rel_token_ids2labels)
     train_dataloader = DataLoader(train_dataset, batch_size=config.batch_size, shuffle=True, collate_fn=collate_fn)
@@ -140,10 +144,6 @@ def main(config: Namespace, logger: logging.Logger) -> None:
     if config.from_cp:
         model = KgiLMBert.from_pretrained(config.model_path)
     else:
-        try:
-            vocab_size = tokenizer.get_vocab_size()
-        except AttributeError:
-            vocab_size = len(tokenizer.get_vocab())
         model_config = AutoConfig.from_pretrained(config.model_path, vocab_size=vocab_size)
         
         num_labels_link_pred = len(rel_token_ids2labels)
@@ -217,31 +217,32 @@ def main(config: Namespace, logger: logging.Logger) -> None:
     logger.info("=== Starting Training Loop ===")
 
     def _save_checkpoint():
-        accelerator.wait_for_everyone()
-        cp_dir = os.path.join(output_fp, f"checkpoint_epoch{epoch + 1}")
-        if not config.nosave:
-            try:
-                accelerator.save_state(cp_dir)
-                with open(os.path.join(cp_dir, "config.json"), "w", encoding=TEXT_ENC) as f_io:
-                    json.dump(model.config.to_dict(), f_io)
-                with open(
-                    os.path.join(cp_dir, "kgi_specific_config.json"), "w", encoding=TEXT_ENC
-                ) as f_io:
-                    json.dump(model.kgi_specific_config, f_io)
-            except Exception as exception:
-                logger.error(
-                    "Checkpoint could not be saved because of the following error:\n%s",
-                    exception
-                )
+        if accelerator.is_local_main_process:
+            accelerator.wait_for_everyone()
+            cp_dir = os.path.join(output_fp, f"checkpoint_epoch{epoch + 1}")
+            if not config.nosave:
+                try:
+                    accelerator.save_state(cp_dir)
+                    with open(os.path.join(cp_dir, "config.json"), "w", encoding=TEXT_ENC) as f_io:
+                        json.dump(model.config.to_dict(), f_io)
+                    with open(
+                        os.path.join(cp_dir, "kgi_specific_config.json"), "w", encoding=TEXT_ENC
+                    ) as f_io:
+                        json.dump(model.kgi_specific_config, f_io)
+                except Exception as exception:
+                    logger.error(
+                        "Checkpoint could not be saved because of the following error:\n%s",
+                        exception
+                    )
     
-    def _run_epoch_iteration(mode, artefacts, dataloader, accelerator=None):
+    def _run_epoch_iteration(mode, artefacts, dataloader, hide_progress_bar, accelerator=None):
         model, optimizer, scheduler = artefacts
         if mode == "train":
             model.train()
         else:
             model.eval()
         batch_loss = []
-        for batch in dataloader:
+        for batch in tqdm(dataloader, disable=hide_progress_bar):
             if mode == "train":
                 with accelerator.accumulate(model):
                     outputs = model(**batch)
@@ -259,12 +260,21 @@ def main(config: Namespace, logger: logging.Logger) -> None:
         return sum(batch_loss) / len(batch_loss)
 
     train_loss_list, eval_loss_list = [], []
+    hide_progress_bar = not config.pb
     for epoch in range(config.epochs):
         artefacts = model, optimizer, scheduler
-        epoch_train_loss = _run_epoch_iteration("train", artefacts, train_dataloader, accelerator)
+        epoch_train_loss = _run_epoch_iteration(
+            "train",
+            artefacts,
+            train_dataloader,
+            hide_progress_bar,
+            accelerator
+        )
         train_loss_list.append(epoch_train_loss)
 
-        epoch_eval_loss = _run_epoch_iteration("eval", artefacts, eval_dataloader)
+        epoch_eval_loss = _run_epoch_iteration(
+            "eval", artefacts, eval_dataloader, hide_progress_bar
+        )
         eval_loss_list.append(epoch_eval_loss)
 
         logger.info(
