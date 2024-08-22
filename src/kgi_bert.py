@@ -89,7 +89,6 @@ class KgiLMBert(PreTrainedModel):
         if from_pretrained:
             self.transformer = AutoModel.from_pretrained(
                 from_pretrained,
-                # config=config,
                 state_dict=state_dict,
                 ignore_mismatched_sizes=True
             )
@@ -147,7 +146,8 @@ class KgiLMBert(PreTrainedModel):
 
         self.kgi_specific_config = {
             k: getattr(self, k) \
-                for k in ("num_labels_link_pred", "link_pred_dropout",
+                for k in (
+                    "num_labels_link_pred", "link_pred_dropout",
                     "num_labels_triple_clf", "triple_clf_dropout",
                     "task_weight_coefficients", "n_tasks", "_clf_classes",
                     "_module_list", "_nonzero_task_weight_coefficients"
@@ -188,13 +188,11 @@ class KgiLMBert(PreTrainedModel):
                 sequence_output,
                 batch_labels=labels,
                 task_type_index_batch=task_type_index,
-                task_type_index_ref=task_type_index_ref.item(),
-                label_list_idx=idx
-            ) for idx, task_type_index_ref in enumerate(task_types_in_batch)
+                task_type_index_ref=task_type_index_ref.item()
+            ) for task_type_index_ref in task_types_in_batch
         ])
         coefs = torch.tensor([*self._nonzero_task_weight_coefficients, 1]).to(losses.device)
-        # remove coefficients for tasks that don't come up in this batch
-        coefs = coefs[task_types_in_batch]
+        coefs = coefs[task_types_in_batch]  # remove coefficients for tasks that don't come up in this batch
         loss = (coefs * losses).sum()
         return Bunch(loss=loss)
 
@@ -203,17 +201,22 @@ class KgiLMBert(PreTrainedModel):
         sequence_output,
         batch_labels,
         task_type_index_batch,
-        task_type_index_ref,
-        label_list_idx
+        task_type_index_ref
     ):
-        tti_idx = task_type_index_batch == task_type_index_ref
+        tti_idx, = torch.where(task_type_index_batch == task_type_index_ref)
         n_classes = self._clf_classes[task_type_index_ref]
         module_name = self._module_list[task_type_index_ref]
         task_specific_output = sequence_output[tti_idx]
+        task_label_list = [batch_labels[i] for i in tti_idx]
         if task_type_index_ref == 2:
             # sequence classification: only use [CLS]
             task_specific_output = task_specific_output[:,0,:]
-        labels = batch_labels[label_list_idx]
+            # integer labels - convert list to tensor
+            labels = torch.tensor(task_label_list)
+        else:
+            # tensor labels - stack list
+            labels = torch.stack(task_label_list)
+        labels = labels.to(sequence_output.device)
         labelmax = labels.max()
         label_mask_bool = labels != -100
         labelmin = labels[label_mask_bool].min().item() if label_mask_bool.sum().item() else 0
