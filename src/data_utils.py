@@ -4,6 +4,7 @@ import os
 import re
 import sys
 import json
+import warnings
 from functools import partial
 from collections import defaultdict
 from string import punctuation
@@ -99,10 +100,11 @@ def load_kgi_tokenizer(
             **tokenizer_special_token_kwargs
         )
     if relation_tokens:
+        n_tokens_to_add = len(relation_tokens) + 1
         n_tokens_added = tokenizer.add_special_tokens(
             {"additional_special_tokens": relation_tokens + ["[HREL]"]}
         )
-        assert n_tokens_added == len(relation_tokens) + 1, \
+        assert n_tokens_added == n_tokens_to_add, \
             "failed to add all relation tokens"
     return tokenizer
 
@@ -160,7 +162,7 @@ def prepare_mixed_dataset(
     Tuple[BatchEncodingDataset, BatchEncodingDataset],
     Tuple[BatchEncodingDataset, PreTrainedTokenizerFast],
     Tuple[BatchEncodingDataset, BatchEncodingDataset, PreTrainedTokenizerFast]
-] :
+]:
     """Main KGI dataset generation function
     
     Parameters
@@ -330,7 +332,8 @@ def mixed_collate_fn(
         clf_triple_data = defaultdict(list)
         for dict_ in clf_triples:
             for k in model_input_names:
-                clf_triple_data[k].append(torch.as_tensor(dict_[k]))
+                val = torch.as_tensor(dict_[k]) if isinstance(dict_[k], list) else dict_[k]
+                clf_triple_data[k].append(val)
         clf_triples_encoding = BatchEncoding(clf_triple_data)
         enc_dicts = *enc_dicts, clf_triples_encoding
     if sentences:
@@ -341,17 +344,16 @@ def mixed_collate_fn(
             special_tokens_mask=torch.stack([s["special_tokens_mask"] for s in sentences])
         )
         sentence_ids = torch.stack([s["input_ids"] for s in sentences])
-        labels = sentence_ids.clone()
-        labels[~mask_idx] = -100
+        labels_tensor = sentence_ids.clone()
+        labels_tensor[~mask_idx] = -100
+        labels = [labels_tensor[i] for i in range(labels_tensor.shape[0])]
         sentence_encodings = {}
         sentence_encodings["labels"] = labels
         sentence_ids[mask_token_idx] = tokenizer.mask_token_id
-        sentence_ids[random_idx] = torch.randint(tokenizer.vocab_size, (random_idx.sum(),))
+        sentence_ids[random_idx] = torch.randint(len(tokenizer), (random_idx.sum(),))
         sentence_encodings["input_ids"] = sentence_ids
         sentence_encodings["attention_mask"] = torch.stack([s["attention_mask"] for s in sentences])
-        sentence_encodings["task_type_index"] = torch.tensor(
-            [s["task_type_index"] for s in sentences]
-        )
+        sentence_encodings["task_type_index"] = [s["task_type_index"] for s in sentences]
         enc_dicts = *enc_dicts, sentence_encodings
 
     if return_enc_dicts:
@@ -359,19 +361,57 @@ def mixed_collate_fn(
 
     # stack all the separate task tensors back together
     output_dict = {}
-    for k in model_input_names:
+    for i, k in enumerate(model_input_names):
         output_value = []
         for enc_dict in enc_dicts:
             if isinstance(enc_dict[k], torch.Tensor):
-                val = enc_dict[k]
+                output_value.append(enc_dict[k])
             elif isinstance(enc_dict[k], list):
-                if isinstance(enc_dict[k][0], torch.Tensor):
-                    val = torch.stack(enc_dict[k])
-                elif isinstance(enc_dict[k][0], (int, float)):
-                    val = torch.tensor(enc_dict[k])
-            output_value.append(val)
-        # labels aren't going to all have the same dims
-        output_dict[k] = output_value if k == "labels" else torch.cat(output_value)
+                output_value.extend(enc_dict[k])
+        if k != "labels":  # labels can have varying dimensions so need to be kept as a list
+            tensor_elems = []
+            for elem in output_value:
+                if isinstance(elem, torch.Tensor):
+                    if len(elem.shape) == 1:
+                        tensor_elems.append(elem.unsqueeze(0))
+                    else:
+                        tensor_elems.append(elem)
+                elif isinstance(elem, (int, float)):
+                    tensor_elems.append(torch.as_tensor(elem).reshape((1, 1)))
+                else:
+                    warnings.warn(
+                        f"Collation: found {k} value with unexpected type {type(elem)}"
+                        "; this will probably cause training errors",
+                        RuntimeWarning
+                    )
+                    tensor_elems.append(elem)
+            try:
+                output_value = torch.cat(tensor_elems).squeeze()
+            except RuntimeError as rterr:
+                def _showtensortypes(tensor_elems):
+                    vals, txt = [], []
+                    for t_elem in tensor_elems:
+                        if isinstance(t_elem, torch.Tensor):
+                            vals.append(t_elem.dtype)
+                            txt.append("tensor: ")
+                        else:
+                            vals.append(type(t_elem))
+                            txt.append("not tensor, ")
+                    return ", ".join(t + str(v) for t, v in zip(txt, vals))
+                warnings.warn(
+                    f"Collation: failed to concatenate {k} tensors: " + \
+                    _showtensortypes(tensor_elems) + \
+                    f", because:\n{rterr}"
+                )
+        if not i:
+            l = len(output_value)
+        else:
+            if l != len(output_value):
+                warnings.warn(
+                    f"Collation: came across inconsistent batch element length {l} for {k}:\n"
+                    f"{', '.join(k + ': ' + str(len(v)) for k, v in output_value.items())}"
+                )
+        output_dict[k] = output_value
     return BatchEncoding(output_dict)
 
 
@@ -444,7 +484,8 @@ def _entity_prediction_collation(
         dict_["input_ids"].masked_fill_(tail_entity_mask, mask_token_id)
         dict_["labels"] = labels.masked_fill(~tail_entity_mask, -100)
         for k in model_input_names:
-            masked_encoding[k].append(torch.as_tensor(dict_[k]))
+            val = torch.as_tensor(dict_[k]) if isinstance(dict_[k], list) else dict_[k]
+            masked_encoding[k].append(val)
     if return_dict:
         return masked_encoding
     return BatchEncoding(masked_encoding)
@@ -468,7 +509,8 @@ def _link_prediction_collation(
             lambda x: rel_token_ids2labels[x] if x in rel_token_ids2labels else x
         )
         for k in model_input_names:
-            masked_encoding[k].append(dict_[k])
+            val = torch.as_tensor(dict_[k]) if isinstance(dict_[k], list) else dict_[k]
+            masked_encoding[k].append(val)
     if return_dict:
         return masked_encoding
     return BatchEncoding(masked_encoding)
