@@ -403,7 +403,7 @@ def mixed_collate_fn(
                     _showtensortypes(tensor_elems) + \
                     f", because:\n{rterr}"
                 )
-        if not i:
+        if not i:  # first iteration
             l = len(output_value)
         else:
             if l != len(output_value):

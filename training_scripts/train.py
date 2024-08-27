@@ -48,6 +48,7 @@ FROM_SCRATCH_HELP = """Include this flag to use only the model config to instant
 transformer, i.e. randomly initialise the weights to train from scratch"""
 ABST_HELP = """Add padding, masking, and separation tokens to the tokenizer during
 data preprocessing"""
+OUTPUT_DIR_HELP = """Where to put the output files"""
 MODEL_RUN_NAME_HELP = """Name to use for the output directory"""
 TRAINSETFRAC_HELP = "Proportion of the input dataset to use for training"
 BATCH_SIZE_HELP = "Number of samples to process at a time"
@@ -84,10 +85,11 @@ def parse_arguments() -> Namespace:
     parser.add_argument("--from_cp", action="store_true", help=FROM_CP_HELP)
     parser.add_argument("--from_scratch", action="store_true", help=FROM_SCRATCH_HELP)
     parser.add_argument("--add_bert_special_tokens", action="store_true", help=ABST_HELP)
+    parser.add_argument("--output_dir", type=str, help=OUTPUT_DIR_HELP)
     parser.add_argument("--model_run_name", type=str, default="kgi", help=MODEL_RUN_NAME_HELP)
     parser.add_argument("--train_set_frac", type=float, default=.95, help=TRAINSETFRAC_HELP)
     parser.add_argument("--batch_size", type=int, default=16, help=BATCH_SIZE_HELP)
-    parser.add_argument("--lr", type=float, default=.00002, help=LR_HELP)
+    parser.add_argument("--lr", type=float, default=.00075, help=LR_HELP)
     parser.add_argument("--epochs", type=int, default=4, help=EPOCHS_HELP)
     parser.add_argument("--grad_acc", type=int, default=4, help=GRAD_ACC_HELP)
     parser.add_argument("--linear_schedule_epochs", type=int, help=LIN_SCHED_EPOCH_HELP)
@@ -145,7 +147,6 @@ def main(config: Namespace, logger: logging.Logger) -> None:
         model = KgiLMBert.from_pretrained(config.model_path)
     else:
         model_config = AutoConfig.from_pretrained(config.model_path, vocab_size=vocab_size)
-        
         num_labels_link_pred = len(rel_token_ids2labels)
         if not config.task_coefs:
             _, task_idx_counts = np.unique(train_dataset.task_type_index, return_counts=True)
@@ -155,7 +156,6 @@ def main(config: Namespace, logger: logging.Logger) -> None:
                 (2 * kg_task_idx_counts_sum)
             task_weight_coefficients[kg_task_idx_counts == 0] = 0
             config.task_coefs = task_weight_coefficients.tolist()
-        
         model = KgiLMBert(
             model_config,
             from_pretrained=config.model_path if not config.from_scratch else None,
@@ -168,11 +168,14 @@ def main(config: Namespace, logger: logging.Logger) -> None:
         optimizer.load_state_dict(optimizer_state_dict)
 
     if not config.nosave:
+        if not args.output_dir:
+            args.output_dir = os.path.join(os.getenv("HOME"), "umls-kgi-runs")
+        if not os.path.isdir(args.output_dir):
+            os.mkdir(args.output_dir)
         now = datetime.now()
         output_subdir = f"{config.model_run_name}_{now.day}-{now.month}_{now.hour}-{now.minute}"
-        output_fp = os.path.join(os.getenv("HOME"), "mbiolm-proj/kgi-runs", output_subdir)
-        if not os.path.isdir(output_fp):
-            os.mkdir(output_fp)
+        output_fp = os.path.join(args.output_dir, output_subdir)
+        os.mkdir(output_fp)
         try:
             script_params = config.as_dict()
         except AttributeError:
@@ -191,7 +194,11 @@ def main(config: Namespace, logger: logging.Logger) -> None:
     logger.info("N. epochs: %d", config.epochs)
     logger.info("Total optimisation steps: %d (accumulating gradients on %d batches at a time)",
         total_train_steps, config.grad_acc)
-    logger.info("Effective Batch Size: %d", config.batch_size * accelerator.num_processes * config.grad_acc)
+    logger.info(
+        "Effective Batch Size: %d (%d x %d x %d)", 
+        config.batch_size * config.grad_acc * accelerator.num_processes,
+        config.batch_size, config.grad_acc, accelerator.num_processes
+    )
     model, optimizer, train_dataloader, eval_dataloader = accelerator.prepare(
         model, optimizer, train_dataloader, eval_dataloader
     )
