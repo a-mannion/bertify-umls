@@ -522,6 +522,8 @@ def _make_mlm_masks(
     special_tokens_mask: torch.Tensor
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     probs = torch.full(input_shape, prob)
+    if special_tokens_mask.dtype != torch.bool:
+        special_tokens_mask = special_tokens_mask.bool()
     probs.masked_fill_(special_tokens_mask, value=0.)
     mask_idx = probs.bernoulli().bool()
     mask_token_idx = torch.bernoulli(torch.full(input_shape, .8)).bool() & mask_idx
