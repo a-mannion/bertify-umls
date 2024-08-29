@@ -226,10 +226,10 @@ def main(config: Namespace, logger: logging.Logger) -> None:
         "%d training sequences in %d batches, %d eval sequences in %d batches (d=%d)",
         n_train, n_train_batches, len(eval_dataset), len(eval_dataloader), config.seq_len
     )
-    logger.info("LR warmup: %s, (%d warmup steps)", schedule_type, num_warmup_steps)
     logger.info("N. epochs: %d", config.epochs)
     logger.info("Total optimisation steps: %d (accumulating gradients on %d batches at a time)",
         total_train_steps, config.grad_acc)
+    logger.info("LR schedule: %s, (%d warmup steps)", schedule_type, num_warmup_steps)
     logger.info(
         "Effective Batch Size: %d (%d x %d x %d)", 
         config.batch_size * config.grad_acc * accelerator.num_processes,
