@@ -98,10 +98,7 @@ class KgiLMBert(PreTrainedModel):
             self.transformer = AutoModel.from_config(config)
         self.config = config
         self.loss_fct = torch.nn.CrossEntropyLoss()
-        clf_classes, module_list, nonzero_task_weight_coefficients = [], [], []
-
-        ### MLM
-        self.lm_head = LMHead(config)
+        clf_classes, module_list, nonzero_task_weight_coefficients = [], [], []        
 
         if self.task_weight_coefficients[0] > 0:
             clf_classes.append(config.vocab_size)
@@ -135,7 +132,8 @@ class KgiLMBert(PreTrainedModel):
         else:
             self.num_labels_triple_clf = self.triple_classifier = None
 
-        # MLM gets task index 3
+        ### MLM (task index 3)
+        self.lm_head = LMHead(config)
         clf_classes.append(config.vocab_size)
         module_list.append("lm_head")
 

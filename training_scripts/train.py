@@ -12,7 +12,7 @@ from tqdm import tqdm
 
 import torch
 import numpy as np
-from accelerate import Accelerator
+from accelerate import Accelerator, DistributedDataParallelKwargs
 from transformers import (
     AutoConfig,
     DistilBertConfig,
@@ -110,12 +110,13 @@ def main(config: Namespace, logger: logging.Logger) -> None:
     # setup
     accelerator = Accelerator(
         mixed_precision="fp16" if config.fp16 else None,
-        gradient_accumulation_steps=config.grad_acc
+        gradient_accumulation_steps=config.grad_acc,
+        kwargs_handlers=[DistributedDataParallelKwargs(static_graph=True)]
     )
     logger.setLevel(logging.INFO if accelerator.is_local_main_process else logging.ERROR)
     set_seed(config.seed)
 
-    # data loading/preprocessing/setup
+    # data loading & preprocessing
     logger.info("Loading & processing KG dataset from %s and text corpus from %s",
         config.kg_fp, config.corpus_fp)
     if config.tokenizer_path is None:
@@ -124,6 +125,8 @@ def main(config: Namespace, logger: logging.Logger) -> None:
     else:
         tokenizer_path = config.tokenizer_path
         load_tokenizer_via_hf = not os.path.isfile(config.tokenizer_path)
+    if accelerator.num_processes > 1:
+        os.environ["TOKENIZERS_PARALLELISM"] = "true"
     train_dataset, eval_dataset, tokenizer = prepare_mixed_dataset(
         kb_datadir=config.kg_fp,
         corpus_fp=config.corpus_fp,
@@ -141,8 +144,8 @@ def main(config: Namespace, logger: logging.Logger) -> None:
     train_dataloader = DataLoader(train_dataset, batch_size=config.batch_size, shuffle=True, collate_fn=collate_fn)
     eval_dataloader = DataLoader(eval_dataset, batch_size=config.batch_size, collate_fn=collate_fn)
 
-    # model setup
-    logger.info("Dataloaders prepared; setting up model: %s", config.model_path)
+    # model init
+    logger.info("Dataloaders prepared; initialising model: %s", config.model_path)
     if config.from_cp:
         model = KgiLMBert.from_pretrained(config.model_path)
     else:
@@ -168,29 +171,62 @@ def main(config: Namespace, logger: logging.Logger) -> None:
         optimizer.load_state_dict(optimizer_state_dict)
 
     if not config.nosave:
-        if not args.output_dir:
-            args.output_dir = os.path.join(os.getenv("HOME"), "umls-kgi-runs")
-        if not os.path.isdir(args.output_dir):
-            os.mkdir(args.output_dir)
+        # prepare output filepaths
+        if not config.output_dir:
+            config.output_dir = os.path.join(os.getenv("HOME"), "umls-kgi-runs")
+        if accelerator.is_local_main_process and not os.path.isdir(config.output_dir):
+            os.mkdir(config.output_dir)
         now = datetime.now()
         output_subdir = f"{config.model_run_name}_{now.day}-{now.month}_{now.hour}-{now.minute}"
-        output_fp = os.path.join(args.output_dir, output_subdir)
-        os.mkdir(output_fp)
-        try:
-            script_params = config.as_dict()
-        except AttributeError:
-            script_params = vars(config)
-        with open(os.path.join(output_fp, "script_params.json"), "w", encoding=TEXT_ENC) as f_io:
-            json.dump(script_params, f_io)
+        output_fp = os.path.join(config.output_dir, output_subdir)
+        if accelerator.is_local_main_process:
+            os.mkdir(output_fp)
+            try:
+                script_params = config.as_dict()
+            except AttributeError:
+                script_params = vars(config)
+            with open(os.path.join(output_fp, "script_params.json"), "w", encoding=TEXT_ENC) as f_io:
+                json.dump(script_params, f_io, indent=4)
 
+    # finalise training parameters, objects, and functions
     n_train = len(train_dataset)
     n_train_batches = len(train_dataloader)
     optimizer_updates_per_epoch = int(n_train_batches / config.grad_acc)
     total_train_steps = config.epochs * optimizer_updates_per_epoch
+    model, optimizer, train_dataloader, eval_dataloader = accelerator.prepare(
+        model, optimizer, train_dataloader, eval_dataloader
+    )
+    logger.info("Model, optimiser & dataloaders wrapped in preparation for training")
+    if config.constant_schedule:
+        scheduler = get_constant_schedule(optimizer)
+        schedule_type = "constant"
+        num_warmup_steps = 0
+    elif config.linear_schedule_epochs is None:
+        num_warmup_steps = int(.2 * total_train_steps)
+        scheduler = get_constant_schedule_with_warmup(optimizer, num_warmup_steps=num_warmup_steps)
+        schedule_type = "warmup+constant"
+    else:
+        # the parameter `config.linear_schedule_epochs` tells the scheduler how many epochs we intend to
+        # train this model for, irrespective of how many we're doing in this run; to continue training
+        # from a checkpoint, going to need to give it the `last_epoch` parameter to tell it whereabouts
+        # in the schedule to resume
+        num_training_steps = optimizer_updates_per_epoch * config.linear_schedule_epochs
+        num_warmup_steps = int(.2 * num_training_steps)
+        scheduler = get_linear_schedule_with_warmup(
+            optimizer,
+            num_warmup_steps=num_warmup_steps,
+            num_training_steps=num_training_steps
+        )
+        schedule_type = "warmup+linear"
+    scheduler = accelerator.prepare(scheduler)
+    if config.from_cp:
+        accelerator.load_state(config.model_path)
+    logger.info("Accelerator state - %s", repr(accelerator.state)[:-1].replace("\n", "; "))
     logger.info(
         "%d training sequences in %d batches, %d eval sequences in %d batches (d=%d)",
         n_train, n_train_batches, len(eval_dataset), len(eval_dataloader), config.seq_len
     )
+    logger.info("LR warmup: %s, (%d warmup steps)", schedule_type, num_warmup_steps)
     logger.info("N. epochs: %d", config.epochs)
     logger.info("Total optimisation steps: %d (accumulating gradients on %d batches at a time)",
         total_train_steps, config.grad_acc)
@@ -199,51 +235,31 @@ def main(config: Namespace, logger: logging.Logger) -> None:
         config.batch_size * config.grad_acc * accelerator.num_processes,
         config.batch_size, config.grad_acc, accelerator.num_processes
     )
-    model, optimizer, train_dataloader, eval_dataloader = accelerator.prepare(
-        model, optimizer, train_dataloader, eval_dataloader
-    )
-    logger.info("Model, optimiser & dataloaders wrapped in preparation for training")
-    if config.constant_schedule:
-        scheduler = get_constant_schedule(optimizer)
-    elif config.linear_schedule_epochs is None:
-        scheduler = get_constant_schedule_with_warmup(optimizer, num_warmup_steps=int(.2 * total_train_steps))
-    else:
-        # the parameter `config.linear_schedule_epochs` tells the scheduler how many epochs we intend to train this model for, irrespective of how many we're doing in this run
-        # for continuing training from a checkpoint, going to need to give it the `last_epoch` parameter to tell it whereabouts in the schedule to resume
-        num_training_steps = optimizer_updates_per_epoch * config.linear_schedule_epochs
-        num_warmup_steps = int(.2 * num_training_steps)
-        scheduler = get_linear_schedule_with_warmup(
-            optimizer,
-            num_warmup_steps=num_warmup_steps,
-            num_training_steps=num_training_steps
-        )
-    scheduler = accelerator.prepare(scheduler)
-    if config.from_cp:
-        accelerator.load_state(config.model_path)
-    logger.info("Accelerator state - %s", repr(accelerator.state)[:-1].replace("\n", "; "))
     logger.info("=== Starting Training Loop ===")
 
-    def _save_checkpoint():
-        if accelerator.is_local_main_process:
-            accelerator.wait_for_everyone()
-            cp_dir = os.path.join(output_fp, f"checkpoint_epoch{epoch + 1}")
-            if not config.nosave:
-                try:
-                    accelerator.save_state(cp_dir)
-                    with open(os.path.join(cp_dir, "config.json"), "w", encoding=TEXT_ENC) as f_io:
-                        json.dump(model.config.to_dict(), f_io)
-                    with open(
-                        os.path.join(cp_dir, "kgi_specific_config.json"), "w", encoding=TEXT_ENC
-                    ) as f_io:
-                        json.dump(model.kgi_specific_config, f_io)
-                except Exception as exception:
-                    logger.error(
-                        "Checkpoint could not be saved because of the following error:\n%s",
-                        exception
-                    )
+    def _save_checkpoint(make_subdir=False):
+        accelerator.wait_for_everyone()
+        if not config.nosave:
+            cp_dir = os.path.join(output_fp, f"checkpoint_epoch{epoch + 1}") if make_subdir else output_fp
+            try:
+                accelerator.save_state(cp_dir)
+            except Exception as exception:
+                logger.error(
+                    "Model checkpoint could not be saved because of the following error:\n%s",
+                    exception
+                )
+            if accelerator.is_local_main_process:
+                unwrapped_model = accelerator.unwrap_model(model)
+                with open(os.path.join(cp_dir, "config.json"), "w", encoding=TEXT_ENC) as f_io:
+                    json.dump(unwrapped_model.config.to_dict(), f_io, indent=4)
+                with open(
+                    os.path.join(cp_dir, "kgi_specific_config.json"), "w", encoding=TEXT_ENC
+                ) as f_io:
+                    json.dump(unwrapped_model.kgi_specific_config, f_io, indent=4)
     
-    def _run_epoch_iteration(mode, artefacts, dataloader, hide_progress_bar, accelerator=None):
-        model, optimizer, scheduler = artefacts
+    def _run_epoch_iteration(
+        mode, model, optimizer, scheduler, dataloader, hide_progress_bar, accelerator=None
+    ):
         if mode == "train":
             model.train()
         else:
@@ -266,13 +282,15 @@ def main(config: Namespace, logger: logging.Logger) -> None:
             batch_loss.append(loss_val)
         return sum(batch_loss) / len(batch_loss)
 
+    # launch training
     train_loss_list, eval_loss_list = [], []
-    hide_progress_bar = not config.pb
+    hide_progress_bar = not (config.pb and accelerator.is_local_main_process)
     for epoch in range(config.epochs):
-        artefacts = model, optimizer, scheduler
         epoch_train_loss = _run_epoch_iteration(
             "train",
-            artefacts,
+            model,
+            optimizer,
+            scheduler,
             train_dataloader,
             hide_progress_bar,
             accelerator
@@ -280,7 +298,7 @@ def main(config: Namespace, logger: logging.Logger) -> None:
         train_loss_list.append(epoch_train_loss)
 
         epoch_eval_loss = _run_epoch_iteration(
-            "eval", artefacts, eval_dataloader, hide_progress_bar
+            "eval", model, optimizer, scheduler, eval_dataloader, hide_progress_bar
         )
         eval_loss_list.append(epoch_eval_loss)
 
@@ -289,7 +307,7 @@ def main(config: Namespace, logger: logging.Logger) -> None:
             epoch + 1, epoch_train_loss, epoch_eval_loss
         )
         if (epoch + 1) % config.epoch_checkpoint_interval == 0 and epoch != config.epochs - 1:
-            _save_checkpoint()
+            _save_checkpoint(make_subdir=True)
 
     if not config.train_data_only:
         logger.info("Training model on evaluation data...")
@@ -305,14 +323,14 @@ def main(config: Namespace, logger: logging.Logger) -> None:
                     scheduler.step()
                     optimizer.zero_grad()
 
-    accelerator.wait_for_everyone()
     if not config.nosave:
-        logger.info("All processes finished; saving model...")
+        logger.info("Saving model...")
         _save_checkpoint()
-        with open(
-            os.path.join(output_fp, "eval_loss_by_epoch.json"), "w", encoding=TEXT_ENC
-        ) as f_io:
-            json.dump({"loss": eval_loss_list}, f_io)
+        if accelerator.is_local_main_process:
+            with open(
+                os.path.join(output_fp, "eval_loss_by_epoch.json"), "w", encoding=TEXT_ENC
+            ) as f_io:
+                json.dump({"loss": eval_loss_list}, f_io, indent=4)
     logger.info("Done!")
 
 
