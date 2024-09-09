@@ -156,7 +156,7 @@ class KgiLMBert(PreTrainedModel):
 
     @classmethod
     def from_pretrained(cls, checkpoint):
-        base_model = torch.load(os.path.join(checkpoint, "pytorch_model.bin"))
+        base_model = torch.load(os.path.join(checkpoint, "pytorch_model.bin"), weights_only=True)
         with open(os.path.join(checkpoint, "config.json"), encoding=TEXT_ENC) as f_io:
             transformer_config = json.load(f_io)
         with open(os.path.join(checkpoint, "kgi_specific_config.json"), encoding=TEXT_ENC) as f_io:

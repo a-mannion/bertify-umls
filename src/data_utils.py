@@ -131,7 +131,7 @@ def load_kgi_model_checkpoint(
             **config_dict
         )
     transformer = AutoModel.from_config(config_obj)
-    torch_dict = torch.load(os.path.join(filepath, "pytorch_model.bin"))
+    torch_dict = torch.load(os.path.join(filepath, "pytorch_model.bin"), weights_only=True)
     transformer_state_dict = {
         k.replace("transformer.", "", 1): v for k, v in torch_dict.items() \
             if k.startswith("transformer")

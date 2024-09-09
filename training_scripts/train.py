@@ -167,7 +167,7 @@ def main(config: Namespace, logger: logging.Logger) -> None:
         )
     optimizer = AdamW(tuple(model.parameters()), lr=config.lr)
     if config.from_cp:
-        optimizer_state_dict = torch.load(os.path.join(config.model_path, "optimizer.bin"))
+        optimizer_state_dict = torch.load(os.path.join(config.model_path, "optimizer.bin"), weights_only=True)
         optimizer.load_state_dict(optimizer_state_dict)
 
     if not config.nosave:
@@ -229,7 +229,7 @@ def main(config: Namespace, logger: logging.Logger) -> None:
     logger.info("N. epochs: %d", config.epochs)
     logger.info("Total optimisation steps: %d (accumulating gradients on %d batches at a time)",
         total_train_steps, config.grad_acc)
-    logger.info("LR schedule: %s, (%d warmup steps)", schedule_type, num_warmup_steps)
+    logger.info("LR schedule: %s (%d warmup steps)", schedule_type, num_warmup_steps)
     logger.info(
         "Effective Batch Size: %d (%d x %d x %d)", 
         config.batch_size * config.grad_acc * accelerator.num_processes,
