@@ -42,6 +42,7 @@ from data_utils import (
 
 TEXT_ENC = sys.getdefaultencoding()
 LOGFMT = "%(asctime)s - %(levelname)s - \t%(message)s"
+DATEFMT = "%d/%m/%Y %H:%M:%S"
 
 DATA_FP_HELP = """Data file path. Expects a folder containing train.json, dev.json and
 test.json files, or a valid argument to pass to datasets.load_dataset, in the case
@@ -534,11 +535,7 @@ def main(args: Namespace, logger: logging.Logger) -> None:
 
 if __name__ == "__main__":
     logger_ = logging.getLogger(__name__)
-    logging.basicConfig(
-        format=LOGFMT,
-        datefmt="%d/%m/%Y %H:%M:%S",
-        level=logging.INFO
-    )
+    logging.basicConfig(format=LOGFMT, datefmt=DATEFMT, level=logging.INFO)
     filterwarnings(action="ignore", category=UserWarning)
     args_ = parse_arguments()
     main(args_, logger_)

@@ -4,6 +4,7 @@ import os
 import sys
 import json
 import logging
+import warnings
 from functools import partial
 from datetime import datetime
 from argparse import ArgumentParser, Namespace
@@ -36,6 +37,7 @@ from data_utils import (
 
 TEXT_ENC = sys.getdefaultencoding()
 LOGFMT = "%(asctime)s - %(levelname)s - \t%(message)s"
+DATEFMT = "%d/%m/%Y %H:%M:%S"
 
 KG_FP_HELP = """Path to the KGI dataset, as created by the `build_dataset` script"""
 CORPUS_FP_HELP = """Path to a text file containing the training corpus for the
@@ -331,11 +333,13 @@ def main(config: Namespace, logger: logging.Logger) -> None:
                 os.path.join(output_fp, "eval_loss_by_epoch.json"), "w", encoding=TEXT_ENC
             ) as f_io:
                 json.dump({"loss": eval_loss_list}, f_io, indent=4)
+            tokenizer.save_pretrained(output_fp)
     logger.info("Done!")
 
 
 if __name__ == "__main__":
     logger_ = logging.getLogger(__name__)
-    logging.basicConfig(format=LOGFMT, datefmt="%d/%m/%Y %H:%M:%S", level=logging.INFO)
+    logging.basicConfig(format=LOGFMT, datefmt=DATEFMT, level=logging.INFO)
+    warnings.simplefilter("ignore", category=FutureWarning)
     main(parse_arguments(), logger_)
     
