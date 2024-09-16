@@ -353,13 +353,13 @@ def build_path_dataset(
     stdout_updates: bool=False
 ) -> Dict[str, Dict[str, str]]:
     """Constructs a dataset of `semantic paths` for the link prediction subtask"""
-    triple_dataset_pathselect = triple_dataset[triple_dataset.REL != "SY"].sample(frac=1.)
+    triple_dataset_pathselect = triple_dataset[triple_dataset.REL != "SY"].sample(frac=1.).reset_index(drop=True)
     total_rows = len(triple_dataset_pathselect)
     path_dataset = {}
     path_id = 0
     if size > len(triple_dataset):
         size = len(triple_dataset)
-    for i, triple in triple_dataset_pathselect.iterrows():
+    for i, sample in triple_dataset_pathselect.iterrows():
         triple = sample.to_dict()
         cui_path = [triple["CUI1"]]
         path = {"t0": {k: triple[k] for k in ("STR2", "REL", "STR1")}}
@@ -382,11 +382,11 @@ def build_path_dataset(
         if len(path) > 1:
             path_dataset[path_id] = path
             path_id += 1
-        if stdout_updates:
-            sys.stdout.write("\r")
-            sys.stdout.flush()
-            sys.stdout.write(f"N. paths: {len(path_dataset)} / {size} ({i} / {total_rows} rows tried)")
-            sys.stdout.flush()
+            if stdout_updates:
+                sys.stdout.write("\r")
+                sys.stdout.flush()
+                sys.stdout.write(f"N. paths: {len(path_dataset)} / {size} ({i} / {total_rows} rows tried)")
+                sys.stdout.flush()
         if len(path_dataset) == size:
             break
     return path_dataset
@@ -473,7 +473,7 @@ def main(args: Namespace, logger: logging.Logger) -> None:
     # link prediction: task index 1
     logger.info("Building path dataset for link prediction...")
     path_dataset = build_path_dataset(
-        triple_dataset_sampled if langstrat else triple_dataset,
+        triple_dataset[triple_dataset.LAT.isin(args.lang)] if langstrat else triple_dataset,
         args.n_samples,
         args.max_path_len,
         stdout_updates=args.verbose
