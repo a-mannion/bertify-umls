@@ -98,12 +98,13 @@ class KgiLMBert(PreTrainedModel):
             self.transformer = AutoModel.from_config(config)
         self.config = config
         self.loss_fct = torch.nn.CrossEntropyLoss()
-        clf_classes, module_list, nonzero_task_weight_coefficients = [], [], []        
+        clf_classes, module_list, nonzero_task_weight_coefficients, active_task_ids = [], [], [], []
 
         if self.task_weight_coefficients[0] > 0:
             clf_classes.append(config.vocab_size)
             module_list.append("lm_head")
             nonzero_task_weight_coefficients.append(self.task_weight_coefficients[0])
+            active_task_ids.append(0)
 
         ### Link prediction (token classification)
         if self.task_weight_coefficients[1] > 0:
@@ -115,6 +116,7 @@ class KgiLMBert(PreTrainedModel):
             clf_classes.append(self.num_labels_link_pred)
             module_list.append("link_classifier")
             nonzero_task_weight_coefficients.append(self.task_weight_coefficients[1])
+            active_task_ids.append(1)
         else:
             self.num_labels_link_pred = self.link_classifier = None
 
@@ -129,6 +131,7 @@ class KgiLMBert(PreTrainedModel):
             clf_classes.append(self.num_labels_triple_clf)
             module_list.append("triple_classifier")
             nonzero_task_weight_coefficients.append(self.task_weight_coefficients[2])
+            active_task_ids.append(2)
         else:
             self.num_labels_triple_clf = self.triple_classifier = None
 
@@ -136,11 +139,13 @@ class KgiLMBert(PreTrainedModel):
         self.lm_head = LMHead(config)
         clf_classes.append(config.vocab_size)
         module_list.append("lm_head")
+        active_task_ids.append(3)
 
         self.n_tasks = len(nonzero_task_weight_coefficients) + 1
         self._clf_classes = clf_classes
         self._module_list = module_list
         self._nonzero_task_weight_coefficients = nonzero_task_weight_coefficients
+        self._active_task_ids = active_task_ids
 
         self.kgi_specific_config = {
             k: getattr(self, k) \
@@ -156,10 +161,16 @@ class KgiLMBert(PreTrainedModel):
 
     @classmethod
     def from_pretrained(cls, checkpoint):
-        base_model = torch.load(os.path.join(checkpoint, "pytorch_model.bin"), weights_only=True)
-        with open(os.path.join(checkpoint, "config.json"), encoding=TEXT_ENC) as f_io:
+        base_model = torch.load(os.path.join(checkpoint, "pytorch_model.bin"))
+        with open(
+            os.path.join(checkpoint, "config.json"),
+            encoding=TEXT_ENC
+        ) as f_io:
             transformer_config = json.load(f_io)
-        with open(os.path.join(checkpoint, "kgi_specific_config.json"), encoding=TEXT_ENC) as f_io:
+        with open(
+            os.path.join(checkpoint, "kgi_specific_config.json"),
+            encoding=TEXT_ENC
+        ) as f_io:
             kgi_specific_config = json.load(f_io)
 
         transformer_state_dict = {
@@ -178,19 +189,27 @@ class KgiLMBert(PreTrainedModel):
         return self_
 
     def forward(self, input_ids, attention_mask, labels, task_type_index):
-        outputs = self.transformer(input_ids, attention_mask, output_hidden_states=False)
+        outputs = self.transformer(
+            input_ids,
+            attention_mask,
+            output_hidden_states=False
+        )
         sequence_output = outputs[0]
-        task_types_in_batch = torch.unique(task_type_index).int()
         losses = torch.stack([
             self._get_loss(
                 sequence_output,
                 batch_labels=labels,
                 task_type_index_batch=task_type_index,
-                task_type_index_ref=task_type_index_ref.item()
-            ) for task_type_index_ref in task_types_in_batch
+                task_type_index_ref=task_type_index_ref
+            ) for task_type_index_ref in self._active_task_ids
         ])
         coefs = torch.tensor([*self._nonzero_task_weight_coefficients, 1]).to(losses.device)
-        coefs = coefs[task_types_in_batch]  # remove coefficients for tasks that don't come up in this batch
+        tti_all, batch_counts = torch.cat((
+            torch.as_tensor(self._active_task_ids).to(coefs.device),
+            torch.unique(task_type_index).int()
+        )).unique(return_counts=True)
+        zero_coef_idx_batch = tti_all[batch_counts == 1]
+        coefs[zero_coef_idx_batch] = 0.
         loss = (coefs * losses).sum()
         return Bunch(loss=loss)
 
@@ -204,24 +223,30 @@ class KgiLMBert(PreTrainedModel):
         tti_idx, = torch.where(task_type_index_batch == task_type_index_ref)
         n_classes = self._clf_classes[task_type_index_ref]
         module_name = self._module_list[task_type_index_ref]
-        task_specific_output = sequence_output[tti_idx]
-        task_label_list = [batch_labels[i] for i in tti_idx]
-        if task_type_index_ref == 2:
-            # sequence classification: only use [CLS]
-            task_specific_output = task_specific_output[:,0,:]
-            # integer labels - convert list to tensor
-            labels = torch.tensor(task_label_list)
-        else:
-            # tensor labels - stack list
-            labels = torch.stack(task_label_list)
-        labels = labels.to(sequence_output.device)
-        labelmax = labels.max()
-        label_mask_bool = labels != -100
-        labelmin = labels[label_mask_bool].min().item() if label_mask_bool.sum().item() else 0
-        assert labelmin >= 0 and labelmax < n_classes, \
-            f"Task {task_type_index_ref}: expected labels in range (0,{n_classes - 1}) \
-                but got ({labelmin},{labelmax})"
         module = getattr(self, module_name)
+        if len(tti_idx):
+            task_specific_output = sequence_output[tti_idx]
+            task_label_list = [batch_labels[i] for i in tti_idx]
+            if task_type_index_ref == 2:
+                # sequence classification: only use [CLS]
+                task_specific_output = task_specific_output[:,0,:]
+                # integer labels - convert list to tensor
+                labels = torch.tensor(task_label_list)
+            else:
+                # tensor labels - stack list
+                labels = torch.stack(task_label_list)
+            labels = labels.to(sequence_output.device)
+            labelmax = labels.max()
+            label_mask_bool = labels != -100
+            labelmin = labels[label_mask_bool].min().item() if label_mask_bool.sum().item() else 0
+            assert labelmin >= 0 and labelmax < n_classes, \
+                f"Task {task_type_index_ref}: expected labels in range (0,{n_classes - 1}) \
+                    but got ({labelmin},{labelmax})"
+        else:
+            # just throw anything into the loss function, the task coefficient will be set to zero
+            # (dummy run of any unused task modules)
+            task_specific_output = torch.rand((1, self.config.dim), device=sequence_output.device)
+            labels = torch.randint(high=n_classes, size=(1,), device=sequence_output.device)
         prediction_output = module(task_specific_output).view(-1, n_classes)
         loss = self.loss_fct(prediction_output, labels.view(-1))
         return loss
