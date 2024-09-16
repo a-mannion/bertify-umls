@@ -485,7 +485,7 @@ def main(args: Namespace, logger: logging.Logger) -> None:
     # link prediction: task index 1
     logger.info("Building path dataset for link prediction...")
     path_dataset = build_path_dataset(
-        triple_dataset_sampled if langstrat else triple_dataset,
+        triple_dataset[triple_dataset.LAT.isin(args.lang)] if langstrat else triple_dataset,
         args.n_samples,
         args.max_path_len,
         stdout_updates=args.verbose
