@@ -4,7 +4,6 @@ import os
 import sys
 import json
 import logging
-import warnings
 from functools import partial
 from datetime import datetime
 from argparse import ArgumentParser, Namespace
@@ -26,7 +25,13 @@ from torch.utils.data import DataLoader
 from torch.optim import AdamW
 
 sys.path.append(
-    os.path.normpath(os.path.join(os.path.dirname(__file__), os.pardir, "src"))
+    os.path.normpath(
+        os.path.join(
+            os.path.dirname(__file__),
+            os.pardir,
+            "src"
+        )
+    )
 )
 from kgi_bert import KgiLMBert
 from data_utils import (
@@ -37,7 +42,6 @@ from data_utils import (
 
 TEXT_ENC = sys.getdefaultencoding()
 LOGFMT = "%(asctime)s - %(levelname)s - \t%(message)s"
-DATEFMT = "%d/%m/%Y %H:%M:%S"
 
 KG_FP_HELP = """Path to the KGI dataset, as created by the `build_dataset` script"""
 CORPUS_FP_HELP = """Path to a text file containing the training corpus for the
@@ -100,35 +104,53 @@ def parse_arguments() -> Namespace:
     parser.add_argument("--task_coefs", type=float, nargs=3, help=TASK_COEFS_HELP)
     parser.add_argument("--epoch_checkpoint_interval", type=int, default=4, help=CP_INTERVAL_HELP)
     parser.add_argument("--n_text_docs", type=int, help=N_TEXT_DOCS_HELP)
-    parser.add_argument("--fp16", action="store_true", help=FP16_HELP)
     parser.add_argument("--constant_schedule", action="store_true", help=CONST_SCHED_HELP)
     parser.add_argument("--train_data_only", action="store_true", help=TDO_HELP)
     parser.add_argument("--nosave", action="store_true", help=NOSAVE_HELP)
     parser.add_argument("--pb", action="store_true", help=TQDM_HELP)
+    parser.add_argument("--fup", action="store_true")
     return parser.parse_args()
 
 
 def main(config: Namespace, logger: logging.Logger) -> None:
     # setup
     accelerator = Accelerator(
-        mixed_precision="fp16" if config.fp16 else None,
+        mixed_precision="fp16",
         gradient_accumulation_steps=config.grad_acc,
-        kwargs_handlers=[DistributedDataParallelKwargs(static_graph=True)]
+        kwargs_handlers=[
+            DistributedDataParallelKwargs(
+                find_unused_parameters=config.fup
+            )
+        ]
     )
-    logger.setLevel(logging.INFO if accelerator.is_local_main_process else logging.ERROR)
+    logger.setLevel(
+        logging.DEBUG if accelerator.is_local_main_process else logging.ERROR
+    )
     set_seed(config.seed)
 
     # data loading & preprocessing
-    logger.info("Loading & processing KG dataset from %s and text corpus from %s",
-        config.kg_fp, config.corpus_fp)
+    logger.info(
+        "Loading & processing KG dataset from %s and text corpus from %s",
+        config.kg_fp,
+        config.corpus_fp
+    )
     if config.tokenizer_path is None:
         tokenizer_path = config.model_path
         load_tokenizer_via_hf = True
     else:
         tokenizer_path = config.tokenizer_path
         load_tokenizer_via_hf = not os.path.isfile(config.tokenizer_path)
-    if accelerator.num_processes > 1:
-        os.environ["TOKENIZERS_PARALLELISM"] = "true"
+    hf_dir = os.path.join(
+        os.getenv("WORK"),
+        "huggingface",
+        "mycache"
+    )
+    if load_tokenizer_via_hf:
+        tokenizer_path = os.path.join(
+            hf_dir,
+            tokenizer_path.replace("/", "--")
+        )
+    os.environ["TOKENIZERS_PARALLELISM"] = "true"
     train_dataset, eval_dataset, tokenizer = prepare_mixed_dataset(
         kb_datadir=config.kg_fp,
         corpus_fp=config.corpus_fp,
@@ -142,40 +164,78 @@ def main(config: Namespace, logger: logging.Logger) -> None:
     )
     vocab_size = len(tokenizer)
     rel_token_ids2labels = get_relation_labels(tokenizer)
-    collate_fn = partial(mixed_collate_fn, tokenizer=tokenizer, rel_token_ids2labels=rel_token_ids2labels)
-    train_dataloader = DataLoader(train_dataset, batch_size=config.batch_size, shuffle=True, collate_fn=collate_fn)
-    eval_dataloader = DataLoader(eval_dataset, batch_size=config.batch_size, collate_fn=collate_fn)
+    collate_fn = partial(
+        mixed_collate_fn,
+        tokenizer=tokenizer,
+        rel_token_ids2labels=rel_token_ids2labels
+    )
+    train_dataloader = DataLoader(
+        train_dataset,
+        batch_size=config.batch_size,
+        shuffle=True,
+        collate_fn=collate_fn
+    )
+    eval_dataloader = DataLoader(
+        eval_dataset,
+        batch_size=config.batch_size,
+        collate_fn=collate_fn
+    )
 
     # model init
     logger.info("Dataloaders prepared; initialising model: %s", config.model_path)
     if config.from_cp:
         model = KgiLMBert.from_pretrained(config.model_path)
     else:
-        model_config = AutoConfig.from_pretrained(config.model_path, vocab_size=vocab_size)
+        local_model_path = config.model_path if os.path.isdir(config.model_path) else \
+            os.path.join(
+                hf_dir,
+                config.model_path.replace("/", "--")
+            )
+        model_config = AutoConfig.from_pretrained(
+            local_model_path,
+            vocab_size=vocab_size
+        )
         num_labels_link_pred = len(rel_token_ids2labels)
         if not config.task_coefs:
-            _, task_idx_counts = np.unique(train_dataset.task_type_index, return_counts=True)
+            _, task_idx_counts = np.unique(
+                train_dataset.task_type_index,
+                return_counts=True
+            )
             kg_task_idx_counts = task_idx_counts[:-1]
             kg_task_idx_counts_sum = kg_task_idx_counts.sum()
-            task_weight_coefficients = (kg_task_idx_counts_sum - kg_task_idx_counts) /\
-                (2 * kg_task_idx_counts_sum)
+            task_weight_coefficients = (
+                kg_task_idx_counts_sum - kg_task_idx_counts
+            ) / (2 * kg_task_idx_counts_sum)
             task_weight_coefficients[kg_task_idx_counts == 0] = 0
             config.task_coefs = task_weight_coefficients.tolist()
+            logger.info(
+                "Calculated task coefficients: %s",
+                ", ".join(map(str, config.task_coefs))
+            )
         model = KgiLMBert(
             model_config,
-            from_pretrained=config.model_path if not config.from_scratch else None,
+            from_pretrained=None if config.from_scratch else local_model_path,
             num_labels_link_pred=num_labels_link_pred,
             task_weight_coefficients=config.task_coefs
         )
     optimizer = AdamW(tuple(model.parameters()), lr=config.lr)
     if config.from_cp:
-        optimizer_state_dict = torch.load(os.path.join(config.model_path, "optimizer.bin"), weights_only=True)
+        optimizer_state_dict = torch.load(
+            os.path.join(
+                config.model_path,
+                "optimizer.bin"
+            )
+        )
         optimizer.load_state_dict(optimizer_state_dict)
 
     if not config.nosave:
         # prepare output filepaths
         if not config.output_dir:
-            config.output_dir = os.path.join(os.getenv("HOME"), "umls-kgi-runs")
+            config.output_dir = os.path.join(
+                os.getenv("WORK"),
+                "umls-kgi",
+                "runs"
+            )
         if accelerator.is_local_main_process and not os.path.isdir(config.output_dir):
             os.mkdir(config.output_dir)
         now = datetime.now()
@@ -187,7 +247,10 @@ def main(config: Namespace, logger: logging.Logger) -> None:
                 script_params = config.as_dict()
             except AttributeError:
                 script_params = vars(config)
-            with open(os.path.join(output_fp, "script_params.json"), "w", encoding=TEXT_ENC) as f_io:
+            with open(
+                os.path.join(output_fp, "script_params.json"),
+                "w", encoding=TEXT_ENC
+            ) as f_io:
                 json.dump(script_params, f_io, indent=4)
 
     # finalise training parameters, objects, and functions
@@ -205,7 +268,10 @@ def main(config: Namespace, logger: logging.Logger) -> None:
         num_warmup_steps = 0
     elif config.linear_schedule_epochs is None:
         num_warmup_steps = int(.2 * total_train_steps)
-        scheduler = get_constant_schedule_with_warmup(optimizer, num_warmup_steps=num_warmup_steps)
+        scheduler = get_constant_schedule_with_warmup(
+            optimizer,
+            num_warmup_steps=num_warmup_steps
+        )
         schedule_type = "warmup+constant"
     else:
         # the parameter `config.linear_schedule_epochs` tells the scheduler how many epochs we intend to
@@ -231,7 +297,7 @@ def main(config: Namespace, logger: logging.Logger) -> None:
     logger.info("N. epochs: %d", config.epochs)
     logger.info("Total optimisation steps: %d (accumulating gradients on %d batches at a time)",
         total_train_steps, config.grad_acc)
-    logger.info("LR schedule: %s (%d warmup steps)", schedule_type, num_warmup_steps)
+    logger.info("LR schedule: %s, (%d warmup steps)", schedule_type, num_warmup_steps)
     logger.info(
         "Effective Batch Size: %d (%d x %d x %d)", 
         config.batch_size * config.grad_acc * accelerator.num_processes,
@@ -252,15 +318,33 @@ def main(config: Namespace, logger: logging.Logger) -> None:
                 )
             if accelerator.is_local_main_process:
                 unwrapped_model = accelerator.unwrap_model(model)
-                with open(os.path.join(cp_dir, "config.json"), "w", encoding=TEXT_ENC) as f_io:
-                    json.dump(unwrapped_model.config.to_dict(), f_io, indent=4)
                 with open(
-                    os.path.join(cp_dir, "kgi_specific_config.json"), "w", encoding=TEXT_ENC
+                    os.path.join(cp_dir, "config.json"),
+                    "w", encoding=TEXT_ENC
                 ) as f_io:
-                    json.dump(unwrapped_model.kgi_specific_config, f_io, indent=4)
+                    json.dump(
+                        unwrapped_model.config.to_dict(),
+                        f_io,
+                        indent=4
+                    )
+                with open(
+                    os.path.join(cp_dir, "kgi_specific_config.json"),
+                    "w", encoding=TEXT_ENC
+                ) as f_io:
+                    json.dump(
+                        unwrapped_model.kgi_specific_config,
+                        f_io,
+                        indent=4
+                    )
     
     def _run_epoch_iteration(
-        mode, model, optimizer, scheduler, dataloader, hide_progress_bar, accelerator=None
+        mode,
+        model,
+        optimizer,
+        scheduler,
+        dataloader,
+        hide_progress_bar, 
+        accelerator=None
     ):
         if mode == "train":
             model.train()
@@ -300,7 +384,12 @@ def main(config: Namespace, logger: logging.Logger) -> None:
         train_loss_list.append(epoch_train_loss)
 
         epoch_eval_loss = _run_epoch_iteration(
-            "eval", model, optimizer, scheduler, eval_dataloader, hide_progress_bar
+            "eval",
+            model,
+            optimizer,
+            scheduler,
+            eval_dataloader,
+            hide_progress_bar
         )
         eval_loss_list.append(epoch_eval_loss)
 
@@ -330,16 +419,23 @@ def main(config: Namespace, logger: logging.Logger) -> None:
         _save_checkpoint()
         if accelerator.is_local_main_process:
             with open(
-                os.path.join(output_fp, "eval_loss_by_epoch.json"), "w", encoding=TEXT_ENC
+                os.path.join(
+                    output_fp,
+                    "eval_loss_by_epoch.json"
+                ),
+                "w", encoding=TEXT_ENC
             ) as f_io:
-                json.dump({"loss": eval_loss_list}, f_io, indent=4)
+                json.dump(
+                    {"loss": eval_loss_list},
+                    f_io,
+                    indent=4
+                )
             tokenizer.save_pretrained(output_fp)
     logger.info("Done!")
 
 
 if __name__ == "__main__":
     logger_ = logging.getLogger(__name__)
-    logging.basicConfig(format=LOGFMT, datefmt=DATEFMT, level=logging.INFO)
-    warnings.simplefilter("ignore", category=FutureWarning)
+    logging.basicConfig(format=LOGFMT, datefmt="%d/%m/%Y %H:%M:%S", level=logging.INFO)
     main(parse_arguments(), logger_)
     
