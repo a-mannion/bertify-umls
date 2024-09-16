@@ -385,7 +385,7 @@ def build_path_dataset(
             if stdout_updates:
                 sys.stdout.write("\r")
                 sys.stdout.flush()
-                sys.stdout.write(f"N. paths: {len(path_dataset)} / {size} ({i} / {total_rows} rows tried)")
+                sys.stdout.write(f"N. paths: {len(path_dataset)} / {size} ({i + 1} / {total_rows} rows tried)")
                 sys.stdout.flush()
         if len(path_dataset) == size:
             break
@@ -431,7 +431,7 @@ def main(args: Namespace, logger: logging.Logger) -> None:
         )
         mrrel = pd.read_csv(os.path.join(args.load_base_tables, "relations.tsv"), **kwargs)
 
-    logger.info(f"Writing to %s...", write_dir)
+    logger.info("Output datasets => %s; building triple dataset...", write_dir)
     # entity prediction: task index 0
     triple_dataset = build_triple_dataset(
         mrrel, mrconso_ref, mrconso_other, size=args.n_samples_base
