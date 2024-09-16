@@ -9,6 +9,7 @@ from functools import partial
 from collections import defaultdict
 from string import punctuation
 from random import sample
+from pathlib import Path
 from typing import Union, Optional, List, Tuple, Type, Dict, Callable
 
 import torch
@@ -79,17 +80,20 @@ def load_kgi_tokenizer(
     add_bert_special_tokens: bool,
     load_via_hf: bool,
     relation_tokens: List[str],
-    model_max_length: int
+    model_max_length: int,
+    fpt_kwargs: Optional[Dict]=None
 ) -> PreTrainedTokenizerFast:
     bert_special_tokens = "SEP", "CLS", "UNK", "MASK", "PAD"
     tokenizer_special_token_kwargs = {
         t.lower() + "_token": "[" + t + "]" for t in bert_special_tokens
     } if add_bert_special_tokens else {}
     if load_via_hf:
+        if fpt_kwargs:
+            tokenizer_special_token_kwargs.update(fpt_kwargs)
         tokenizer = AutoTokenizer.from_pretrained(
             name_or_path,
             model_max_length=model_max_length,
-            **tokenizer_special_token_kwargs
+            **tokenizer_special_token_kwargs,
         )
     else:
         tokenizer = PreTrainedTokenizerFast(
@@ -131,7 +135,7 @@ def load_kgi_model_checkpoint(
             **config_dict
         )
     transformer = AutoModel.from_config(config_obj)
-    torch_dict = torch.load(os.path.join(filepath, "pytorch_model.bin"), weights_only=True)
+    torch_dict = torch.load(os.path.join(filepath, "pytorch_model.bin"))
     transformer_state_dict = {
         k.replace("transformer.", "", 1): v for k, v in torch_dict.items() \
             if k.startswith("transformer")
@@ -156,7 +160,8 @@ def prepare_mixed_dataset(
     n_text_docs: Optional[int]=None,
     train_set_frac: Optional[float]=None,
     add_bert_special_tokens: bool=True,
-    shuffle: bool=False
+    shuffle: bool=False,
+    tokenizer_fpt_kwargs: Optional[Dict]=None
 ) -> Union[
     Tuple[BatchEncodingDataset],
     Tuple[BatchEncodingDataset, BatchEncodingDataset],
@@ -170,7 +175,8 @@ def prepare_mixed_dataset(
     kb_datadir:
         Directory containing the dataset (generated using `build_dataset.py`)
     corpus_fp:
-        Path to the text file to use for MLM
+        Path to the text file to use for MLM; if it's a directory, all .txt files in
+        the directory will be loaded
     tokenizer:
         Tokenizer instance to use - can also be a path allowing transformers to load
         a tokenizer
@@ -194,7 +200,14 @@ def prepare_mixed_dataset(
         Randomise the order of the training sequences before BERT-specific processing
     """
     kb_sequence_dataset = _build_kb_sequence_dataset(kb_datadir, shuffle=shuffle)
-    sentences = _load_sentences(corpus_fp, n_text_docs)
+    if os.path.isfile(corpus_fp):
+        sentences = _load_sentences(corpus_fp, n_text_docs)
+    elif os.path.isdir(corpus_fp):
+        sentences = []
+        for txtfile in Path(corpus_fp).glob("*.txt"):
+            sentences.extend(_load_sentences(txtfile, n_text_docs))
+    else:
+        raise ValueError(f"Not a valid path: {corpus_fp}")
     if tokenizer is None:
         return kb_sequence_dataset, sentences
     return_tokenizer = False
@@ -205,9 +218,15 @@ def prepare_mixed_dataset(
             add_bert_special_tokens=add_bert_special_tokens,
             load_via_hf=load_tokenizer_via_hf,
             relation_tokens=kb_sequence_dataset["relation_tokens"],
-            model_max_length=model_max_length
+            model_max_length=model_max_length,
+            fpt_kwargs=tokenizer_fpt_kwargs
         )
-    tokenize = partial(tokenizer, return_special_tokens_mask=True, padding=False, truncation=True)
+    tokenize = partial(
+        tokenizer,
+        return_special_tokens_mask=True,
+        padding=False,
+        truncation=True
+    )
     triple_encoding_entpred = tokenize(kb_sequence_dataset["triples_ep"])
     triple_encoding_clf = tokenize(kb_sequence_dataset["triples_clf"]["text"])
     triple_encoding_clf["labels"] = kb_sequence_dataset["triples_clf"]["labels"]
@@ -291,7 +310,7 @@ def mixed_collate_fn(
             if isinstance(data_val, list) and k in pad_id_mapping:
                 diff = max_len - len(data_val)
                 padded_seq = data_val + [pad_id_mapping[k]] * diff
-                batch_ex[k] = torch.tensor(padded_seq, dtype=torch.long)
+                batch_ex[k] = torch.tensor(padded_seq, dtype=torch.long)    
 
     # split into tasks
     entpred_triples = [b for b in batch_examples if b["task_type_index"] == 0]
