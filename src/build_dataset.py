@@ -18,13 +18,10 @@ import logging
 import warnings
 from argparse import ArgumentParser, Namespace
 from typing import Union, Dict, List, Tuple, Optional
-
-import pandas as pd
-
-##### DB
 from cProfile import Profile
 from pstats import Stats
-##### 
+
+import pandas as pd
 
 
 # command line arguments
@@ -360,14 +357,15 @@ def build_path_dataset(
     stdout_updates: bool=False
 ) -> Dict[str, Dict[str, str]]:
     """Constructs a dataset of `semantic paths` for the link prediction subtask"""
-    triple_dataset_pathselect = triple_dataset[triple_dataset.REL != "SY"].sample(frac=1.)
+    triple_dataset_pathselect = triple_dataset[triple_dataset.REL != "SY"] \
+        .sample(frac=1.).reset_index(drop=True)
     total_rows = len(triple_dataset_pathselect)
     path_dataset = {}
     path_id = 0
     if size > len(triple_dataset):
         size = len(triple_dataset)
     for i, triple in triple_dataset_pathselect.iterrows():
-        cui_path = []
+        cui_path = [triple.CUI1]
         path = {"t0": {k: triple[k] for k in ("STR2", "REL", "STR1")}}
         while len(path) < max_path_len:
             cui_path.append(triple.CUI1)
@@ -389,12 +387,14 @@ def build_path_dataset(
         if len(path) > 1:
             path_dataset[path_id] = path
             path_id += 1
-        if stdout_updates:
-            sys.stdout.write("\r")
-            sys.stdout.flush()
-            sys.stdout.write(f"N. paths: {len(path_dataset)} / {size} ({i} / {total_rows} rows tried)")
-            sys.stdout.flush()
+            if stdout_updates:
+                sys.stdout.write("\r")
+                sys.stdout.flush()
+                sys.stdout.write(f"N. paths: {len(path_dataset)} / {size} ({i + 1} / {total_rows} rows tried)")
+                sys.stdout.flush()
         if len(path_dataset) == size:
+            if stdout_updates:
+                sys.stdout.write("\n")
             break
     return path_dataset
 
@@ -448,26 +448,26 @@ def main(args: Namespace, logger: logging.Logger) -> None:
         mrrel, mrconso_ref, mrconso_other, size=args.n_samples_base
     )
     langstrat = not (monolingual or args.lang_strat_type == "none")
-    if langstrat:
-        if args.lang_strat_type == "rel":
-            lang_sample_sizes = [
-                int(args.n_samples * (triple_dataset.LAT == l).sum() / len(triple_dataset)) \
-                    for l in args.lang
-            ]
-        else:
-            lang_sample_sizes = [int(args.n_samples / len(args.lang))] * len(args.lang)
-        if len(triple_dataset) % len(args.lang) > 0:
-            lang_sample_sizes[-1] += 1
-        triple_dataset_sample_list = []
-        for lang, sample_size in zip(args.lang, lang_sample_sizes):
-            lang_triples = triple_dataset[triple_dataset.LAT == lang]
-            if len(lang_triples) > sample_size:
-                lang_triples = lang_triples.sample(sample_size)
-            triple_dataset_sample_list.append(lang_triples)
-        triple_dataset_sampled = pd.concat(triple_dataset_sample_list)
-    else:
-        triple_dataset_sampled = triple_dataset.sample(args.n_samples)
     if not args.paths_only:
+        if langstrat:
+            if args.lang_strat_type == "rel":
+                lang_sample_sizes = [
+                    int(args.n_samples * (triple_dataset.LAT == l).sum() / len(triple_dataset)) \
+                        for l in args.lang
+                ]
+            else:
+                lang_sample_sizes = [int(args.n_samples / len(args.lang))] * len(args.lang)
+            if len(triple_dataset) % len(args.lang) > 0:
+                lang_sample_sizes[-1] += 1
+            triple_dataset_sample_list = []
+            for lang, sample_size in zip(args.lang, lang_sample_sizes):
+                lang_triples = triple_dataset[triple_dataset.LAT == lang]
+                if len(lang_triples) > sample_size:
+                    lang_triples = lang_triples.sample(sample_size)
+                triple_dataset_sample_list.append(lang_triples)
+            triple_dataset_sampled = pd.concat(triple_dataset_sample_list)
+        else:
+            triple_dataset_sampled = triple_dataset.sample(args.n_samples)
         logger.info("Triple dataset for entity prediction: n=%d", len(triple_dataset_sampled))
         triple_dataset_sampled.to_csv(os.path.join(write_dir, "triples.tsv"), sep="\t", index=False)
         
