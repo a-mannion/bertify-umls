@@ -16,11 +16,15 @@ import sys
 import json
 import logging
 import warnings
-from tqdm import tqdm
 from argparse import ArgumentParser, Namespace
 from typing import Union, Dict, List, Tuple, Optional
 
 import pandas as pd
+
+##### DB
+from cProfile import Profile
+from pstats import Stats
+##### 
 
 
 # command line arguments
@@ -77,10 +81,10 @@ EXCLUDE_SEMANTIC_TYPES = (
 def parse_arguments() -> Namespace:
     """Command line parser"""
     parser = ArgumentParser()
-    parser.add_argument("umls_dir", type=str, help=UMLS_DIR_HELP)
-    parser.add_argument("srdef", type=str, help=SRDEF_PATH_HELP)
-    parser.add_argument("sg", type=str, help=SG_PATH_HELP)
-    parser.add_argument("writepath", type=str, help=WRITE_PATH_HELP)
+    parser.add_argument("--umls_dir", type=str, help=UMLS_DIR_HELP)
+    parser.add_argument("--srdef", type=str, help=SRDEF_PATH_HELP)
+    parser.add_argument("--sg", type=str, help=SG_PATH_HELP)
+    parser.add_argument("--writepath", type=str, help=WRITE_PATH_HELP, default=os.getenv("HOME"))
     parser.add_argument("--lang", type=str, nargs="+", default="ENG", help=LANG_HELP)
     parser.add_argument("--load_base_tables", type=str, help=LBT_HELP)
     parser.add_argument("--n_samples", type=int, default=10000, help=NSAMPLES_HELP)
@@ -94,6 +98,8 @@ def parse_arguments() -> Namespace:
         help=LANGSTRATTYPE_HELP
     )
     parser.add_argument("--verbose", action="store_true")
+    parser.add_argument("--paths_only", action="store_true")
+    parser.add_argument("--existing_subdir", type=int)
 
     return parser.parse_args()
 
@@ -292,9 +298,8 @@ def build_triple_classification_dataset(
             triple_sample = triple_dataset.sample(size)
     triple_sample["clf_label"] = [1 for _ in range(len(triple_sample))]
     sg_sample_sizes = triple_sample[["SG2"]].reset_index(drop=False).groupby("SG2") \
-        .count().iloc[:,0].to_dict()
-    # to be used in negative sampling strategy 2
-    between_group_relations = triple_sample[triple_sample.SG1 != triple_sample.SG2]
+        .count().iloc[:, 0].to_dict()
+    between_group_relations = triple_sample[triple_sample.SG1 != triple_sample.SG2]  # to be used in negative sampling strategy 2
     triple_sample.drop(["SG1", "SG2"], inplace=True, axis=1)
 
     # negative sampling strategy 1: sample a concept at random then sample & resample
@@ -309,20 +314,17 @@ def build_triple_classification_dataset(
         sg_concepts = mrconso_ref[mrconso_ref.SG == sem_grp]
         concept_sample = sg_concepts.sample(int(sample_size / 2))
         for _, row in concept_sample.iterrows():
-            sample_target_concept = sg_concepts.sample().reset_index().transpose() \
-                .iloc[:, 0].to_dict()
-            while row.name + sample_target_concept["CUI"] in relation_cui_check_idx:
+            sample_target_concept = sg_concepts.sample().reset_index()
+            while row.name + sample_target_concept.CUI.item() in relation_cui_check_idx:
                 # check if a relation exists
-                sample_target_concept = sg_concepts.sample().reset_index().transpose() \
-                    .iloc[:, 0].to_dict()
-                
+                sample_target_concept = sg_concepts.sample().reset_index()
             neg_relation = relations.sample().item()
             # columns: CUI1, AUI1, REL, CUI2, AUI2, STR2, LAT, STR1, clf_label
             triple_sample.loc[triple_sample.index.max() + 1] = [
-                sample_target_concept["CUI"],
-                sample_target_concept["AUI"],
+                sample_target_concept.CUI.item(),
+                sample_target_concept.AUI.item(),
                 neg_relation, row.name, row.AUI,
-                row.STR, None, sample_target_concept["STR"], 0
+                row.STR, None, sample_target_concept.STR.item(), 0
             ]
 
     # negative sampling strategy 2: find any relation for which the two concepts come from
@@ -355,41 +357,43 @@ def build_path_dataset(
     triple_dataset: pd.DataFrame,
     size: int,
     max_path_len: int,
-    progress_bar: Optional[bool]=False
+    stdout_updates: bool=False
 ) -> Dict[str, Dict[str, str]]:
     """Constructs a dataset of `semantic paths` for the link prediction subtask"""
-    triple_dataset_pathselect = triple_dataset[triple_dataset.REL != "SY"]
+    triple_dataset_pathselect = triple_dataset[triple_dataset.REL != "SY"].sample(frac=1.)
+    total_rows = len(triple_dataset_pathselect)
     path_dataset = {}
     path_id = 0
     if size > len(triple_dataset):
         size = len(triple_dataset)
-    for _, sample in tqdm(
-        triple_dataset_pathselect.iterrows(),
-        total=size,
-        disable=not progress_bar
-    ):
-        triple = sample.to_dict()
-        cui_path = [triple["CUI1"]]
+    for i, triple in triple_dataset_pathselect.iterrows():
+        cui_path = []
         path = {"t0": {k: triple[k] for k in ("STR2", "REL", "STR1")}}
         while len(path) < max_path_len:
-            prev_cui = triple["CUI1"]
-            cui_path.append(prev_cui)
+            cui_path.append(triple.CUI1)
             possible_next_steps = triple_dataset_pathselect[
-                triple_dataset_pathselect.CUI2 == prev_cui
+                triple_dataset_pathselect.CUI2 == triple.CUI1
             ]
-            next_step_iter, n_possible = 0, len(possible_next_steps)
-            if not n_possible:
+            possible_next_steps_idx = triple_dataset_pathselect.CUI2 == triple.CUI1
+            if not any(possible_next_steps_idx):
                 break  # silently stops here if no possible next step is found
-            while triple["CUI1"] in cui_path:
-                triple = possible_next_steps.sample().reset_index().transpose().iloc[:, 0].to_dict()
+            next_step_iter, n_possible = 0, possible_next_steps_idx.sum()
+            possible_next_steps = triple_dataset_pathselect[possible_next_steps_idx]
+            while triple.CUI1 in cui_path:
+                triple = possible_next_steps.sample().reset_index().iloc[0, :]
                 next_step_iter += 1
                 if next_step_iter > n_possible:
                     break
             else:
-                path["t" + str(len(path))] = {"REL": triple["REL"], "STR": triple["STR1"]}
+                path["t" + str(len(path))] = {"REL": triple.REL, "STR": triple.STR1}
         if len(path) > 1:
             path_dataset[path_id] = path
             path_id += 1
+        if stdout_updates:
+            sys.stdout.write("\r")
+            sys.stdout.flush()
+            sys.stdout.write(f"N. paths: {len(path_dataset)} / {size} ({i} / {total_rows} rows tried)")
+            sys.stdout.flush()
         if len(path_dataset) == size:
             break
     return path_dataset
@@ -404,12 +408,16 @@ def main(args: Namespace, logger: logging.Logger) -> None:
         subdir_stem = args.lang.lower() + "_v"
     else:
         subdir_stem = "multi_v"
-    datagen_version = 0
-    while subdir_stem + str(datagen_version) in os.listdir(args.writepath):
-        datagen_version += 1
-    subdir = subdir_stem + str(datagen_version)
-    write_dir = os.path.join(args.writepath, subdir)
-    os.mkdir(write_dir)
+    if args.existing_subdir is None:
+        datagen_version = 0
+        while subdir_stem + str(datagen_version) in os.listdir(args.writepath):
+            datagen_version += 1
+        subdir = subdir_stem + str(datagen_version)
+        write_dir = os.path.join(args.writepath, subdir)
+        os.mkdir(write_dir)
+    else:
+        write_dir = os.path.join(args.writepath, subdir_stem + str(args.existing_subdir))
+        assert os.path.isdir(write_dir), f"{write_dir} not found"
     if args.load_base_tables is None:
         mrconso_ref, mrconso_other, mrrel = build_metathesaurus_tables(
             args.umls_dir, args.srdef, args.sg, lang=args.lang,
@@ -422,6 +430,7 @@ def main(args: Namespace, logger: logging.Logger) -> None:
         mrconso_other.to_csv(os.path.join(bt_dir, "concepts.tsv"), sep="\t", index=False)
         mrrel.to_csv(os.path.join(bt_dir, "relations.tsv"), sep="\t", index=False)
     else:
+        logger.info("Loading metathesaurus tables from %s", args.load_base_tables)
         kwargs = {"sep": "\t", "engine": "pyarrow", "dtype_backend": "pyarrow"}
         mrconso_ref = pd.read_csv(
             os.path.join(args.load_base_tables, "concept_ref.tsv"),
@@ -451,25 +460,27 @@ def main(args: Namespace, logger: logging.Logger) -> None:
             lang_sample_sizes[-1] += 1
         triple_dataset_sample_list = []
         for lang, sample_size in zip(args.lang, lang_sample_sizes):
-            triple_dataset_sample_list.append(
-                triple_dataset[triple_dataset.LAT == lang].sample(sample_size)
-            )
+            lang_triples = triple_dataset[triple_dataset.LAT == lang]
+            if len(lang_triples) > sample_size:
+                lang_triples = lang_triples.sample(sample_size)
+            triple_dataset_sample_list.append(lang_triples)
         triple_dataset_sampled = pd.concat(triple_dataset_sample_list)
     else:
         triple_dataset_sampled = triple_dataset.sample(args.n_samples)
-    logger.info("Triple dataset for entity prediction: n=%d", len(triple_dataset_sampled))
-    triple_dataset_sampled.to_csv(os.path.join(write_dir, "triples.tsv"), sep="\t", index=False)
-    
-    # triple classification: task index 2
-    logger.info("Building triple dataset for classification...")
-    triple_classification_dataset = build_triple_classification_dataset(
-        triple_dataset_sampled if langstrat else triple_dataset,
-        mrconso_ref, mrrel, size=args.n_samples
-    )
-    logger.info("Triple dataset for classification: n=%d", len(triple_classification_dataset))
-    triple_classification_dataset.to_csv(
-        os.path.join(write_dir, "triple_clf.tsv"), sep="\t", index=False
-    )
+    if not args.paths_only:
+        logger.info("Triple dataset for entity prediction: n=%d", len(triple_dataset_sampled))
+        triple_dataset_sampled.to_csv(os.path.join(write_dir, "triples.tsv"), sep="\t", index=False)
+        
+        # triple classification: task index 2
+        logger.info("Building triple dataset for classification...")
+        triple_classification_dataset = build_triple_classification_dataset(
+            triple_dataset_sampled if langstrat else triple_dataset,
+            mrconso_ref, mrrel, size=args.n_samples
+        )
+        logger.info("Triple dataset for classification: n=%d", len(triple_classification_dataset))
+        triple_classification_dataset.to_csv(
+            os.path.join(write_dir, "triple_clf.tsv"), sep="\t", index=False
+        )
     
     # link prediction: task index 1
     logger.info("Building path dataset for link prediction...")
@@ -477,7 +488,7 @@ def main(args: Namespace, logger: logging.Logger) -> None:
         triple_dataset_sampled if langstrat else triple_dataset,
         args.n_samples,
         args.max_path_len,
-        progress_bar=args.verbose
+        stdout_updates=args.verbose
     )
     logger.info("Path dataset for link prediction: n=%d", len(path_dataset))
     with open(
@@ -494,4 +505,10 @@ if __name__ == "__main__":
         datefmt="%d/%m/%Y %H:%M:%S",
         level=logging.INFO if args_.verbose else logging.WARNING
     )
+
+    profiler = Profile()
+    profiler.enable()
     main(args_, logger_)
+    profiler.disable()
+    stats = Stats(profiler).sort_stats("cumtime")
+    stats.print_stats()
