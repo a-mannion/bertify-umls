@@ -16,6 +16,7 @@ import sys
 import json
 import logging
 import warnings
+from tqdm import tqdm
 from argparse import ArgumentParser, Namespace
 from typing import Union, Dict, List, Tuple, Optional
 
@@ -350,16 +351,20 @@ def build_path_dataset(
     triple_dataset: pd.DataFrame,
     size: int,
     max_path_len: int,
-    stdout_updates: bool=False
+    progress_bar: bool=False
 ) -> Dict[str, Dict[str, str]]:
     """Constructs a dataset of `semantic paths` for the link prediction subtask"""
-    triple_dataset_pathselect = triple_dataset[triple_dataset.REL != "SY"].sample(frac=1.).reset_index(drop=True)
+    triple_dataset_pathselect = triple_dataset[triple_dataset.REL != "SY"].sample(frac=1.)
     total_rows = len(triple_dataset_pathselect)
     path_dataset = {}
     path_id = 0
     if size > len(triple_dataset):
         size = len(triple_dataset)
-    for i, sample in triple_dataset_pathselect.iterrows():
+    for _, sample in tqdm(
+        triple_dataset_pathselect.iterrows(),
+        total=total_rows,
+        disable=not progress_bar
+    ):
         triple = sample.to_dict()
         cui_path = [triple["CUI1"]]
         path = {"t0": {k: triple[k] for k in ("STR2", "REL", "STR1")}}
@@ -367,26 +372,17 @@ def build_path_dataset(
             prev_cui = triple["CUI1"]
             cui_path.append(prev_cui)
             possible_next_steps = triple_dataset_pathselect[
-                triple_dataset_pathselect.CUI2 == prev_cui
+                (triple_dataset_pathselect.CUI2 == prev_cui) & \
+                (~triple_dataset_pathselect.CUI1.isin(cui_path))
             ]
             next_step_iter, n_possible = 0, len(possible_next_steps)
             if not n_possible:
                 break  # silently stops here if no possible next step is found
-            while triple["CUI1"] in cui_path:
-                triple = possible_next_steps.sample().reset_index().transpose().iloc[:, 0].to_dict()
-                next_step_iter += 1
-                if next_step_iter > n_possible:
-                    break
-            else:
-                path["t" + str(len(path))] = {"REL": triple["REL"], "STR": triple["STR1"]}
+            triple = possible_next_steps.sample().reset_index().transpose().iloc[:, 0].to_dict()
+            path["t" + str(len(path))] = {"REL": triple["REL"], "STR": triple["STR1"]}
         if len(path) > 1:
             path_dataset[path_id] = path
             path_id += 1
-            if stdout_updates:
-                sys.stdout.write("\r")
-                sys.stdout.flush()
-                sys.stdout.write(f"N. paths: {len(path_dataset)} / {size} ({i + 1} / {total_rows} rows tried)")
-                sys.stdout.flush()
         if len(path_dataset) == size:
             break
     return path_dataset
@@ -473,10 +469,10 @@ def main(args: Namespace, logger: logging.Logger) -> None:
     # link prediction: task index 1
     logger.info("Building path dataset for link prediction...")
     path_dataset = build_path_dataset(
-        triple_dataset[triple_dataset.LAT.isin(args.lang)] if langstrat else triple_dataset,
+        triple_dataset_sampled if langstrat else triple_dataset,
         args.n_samples,
         args.max_path_len,
-        stdout_updates=args.verbose
+        progress_bar=args.verbose
     )
     logger.info("Path dataset for link prediction: n=%d", len(path_dataset))
     with open(
