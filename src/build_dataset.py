@@ -378,13 +378,14 @@ def build_path_dataset(
         while len(path) < max_path_len:
             prev_cui = triple["CUI1"]
             cui_path.append(prev_cui)
-            # possible_next_steps_idx = triple_dataset_pathselect.CUI2 == prev_cui
-            possible_next_steps = triple_dataset_pathselect[triple_dataset_pathselect.CUI2 == prev_cui]
+            possible_next_steps = triple_dataset_pathselect[
+                triple_dataset_pathselect.CUI2 == prev_cui
+            ]
             next_step_iter, n_possible = 0, len(possible_next_steps)
             if not n_possible:
                 break  # silently stops here if no possible next step is found
             while triple["CUI1"] in cui_path:
-                triple = possible_next_steps.sample(random_state=rs).iloc[0, :].to_dict()
+                triple = possible_next_steps.sample(random_state=rs).reset_index().iloc[0, :].to_dict()
                 next_step_iter += 1
                 if next_step_iter > n_possible:
                     break
@@ -393,11 +394,11 @@ def build_path_dataset(
         if len(path) > 1:
             path_dataset[path_id] = path
             path_id += 1
-        if stdout_updates:
-            sys.stdout.write("\r")
-            sys.stdout.flush()
-            sys.stdout.write(f"N. paths: {path_id} / {size} ({i + 1} / {total_rows} rows tried)")
-            sys.stdout.flush()
+            if stdout_updates:
+                sys.stdout.write("\r")
+                sys.stdout.flush()
+                sys.stdout.write(f"N. paths: {path_id} / {size} ({i + 1} / {total_rows} rows tried)")
+                sys.stdout.flush()
         if len(path_dataset) == size:
             if stdout_updates:
                 sys.stdout.write("\n")
