@@ -96,11 +96,12 @@ def parse_arguments() -> Namespace:
     )
     parser.add_argument("--existing_subdir", type=int)
     parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--ss", type=int)
     parser.add_argument("--verbose", action="store_true")
     parser.add_argument("--paths_only", action="store_true")
     parser.add_argument("--prof", action="store_true")
     parser.add_argument("--ns", action="store_true")
-
+    
     return parser.parse_args()
 
 
@@ -360,7 +361,8 @@ def build_path_dataset(
     size: int,
     max_path_len: int,
     stdout_updates: bool=False,
-    rs: int=0
+    rs: int=0,
+    subsample: Optional[int]=None
 ) -> Dict[str, Dict[str, str]]:
     """Constructs a dataset of `semantic paths` for the link prediction subtask"""
     triple_dataset_pathselect = triple_dataset[triple_dataset.REL != "SY"] \
@@ -368,36 +370,42 @@ def build_path_dataset(
     total_rows = len(triple_dataset_pathselect)
     path_dataset = {}
     path_id = 0
+    subsample_size = int(total_rows // subsample) if subsample else 0
     if size > len(triple_dataset):
         size = len(triple_dataset)
     print("Starting loop")
+    def _stdoutstr(path_id, size, iter_, total, sss=None):
+        str_ = f"N. paths: {path_id} / {size} ({iter_ + 1} rows tried | n={total}"
+        if sss:
+            str_ += f", subsampling {sss}"
+        return str_ + ")"
     for i, row in triple_dataset_pathselect.iterrows():
         triple = row.to_dict()
         cui_path = [triple["CUI1"]]
         path = {"t0": {k: triple[k] for k in ("STR2", "REL", "STR1")}}
+        triple_dataset_pathselect_ss = triple_dataset_pathselect.sample(
+            subsample_size, random_state=int(rs * i)
+        ) if subsample_size else triple_dataset_pathselect
         while len(path) < max_path_len:
             prev_cui = triple["CUI1"]
             cui_path.append(prev_cui)
-            possible_next_steps = triple_dataset_pathselect[
-                triple_dataset_pathselect.CUI2 == prev_cui
+            possible_next_steps = triple_dataset_pathselect_ss[
+                (triple_dataset_pathselect_ss.CUI2 == prev_cui) & \
+                (~triple_dataset_pathselect_ss.CUI1.isin(cui_path))
             ]
-            next_step_iter, n_possible = 0, len(possible_next_steps)
-            if not n_possible:
+            if not len(possible_next_steps):
                 break  # silently stops here if no possible next step is found
-            while triple["CUI1"] in cui_path:
-                triple = possible_next_steps.sample(random_state=rs).reset_index().iloc[0, :].to_dict()
-                next_step_iter += 1
-                if next_step_iter > n_possible:
-                    break
-            else:
-                path["t" + str(len(path))] = {"REL": triple["REL"], "STR": triple["STR1"]}
+            triple = possible_next_steps.sample(random_state=rs).reset_index().iloc[0, :].to_dict()
+            path["t" + str(len(path))] = {"REL": triple["REL"], "STR": triple["STR1"]}
         if len(path) > 1:
             path_dataset[path_id] = path
             path_id += 1
             if stdout_updates:
                 sys.stdout.write("\r")
                 sys.stdout.flush()
-                sys.stdout.write(f"N. paths: {path_id} / {size} ({i + 1} / {total_rows} rows tried)")
+                sys.stdout.write(_stdoutstr(
+                    path_id, size, i, total_rows, subsample_size
+                ))
                 sys.stdout.flush()
         if len(path_dataset) == size:
             if stdout_updates:
@@ -449,7 +457,10 @@ def main(args: Namespace, logger: logging.Logger) -> None:
         )
         mrrel = pd.read_csv(os.path.join(args.load_base_tables, "relations.tsv"), **kwargs)
 
-    logger.info(f"Writing to %s...", write_dir)
+    if not args.ns:
+        logger.info(f"Writing to %s...", write_dir)
+    else:
+        logger.info("Building triple dataset...")
     # entity prediction: task index 0
     triple_dataset = build_triple_dataset(
         mrrel,
@@ -505,9 +516,12 @@ def main(args: Namespace, logger: logging.Logger) -> None:
         args.n_samples,
         args.max_path_len,
         stdout_updates=args.verbose,
-        rs=args.seed
+        rs=args.seed,
+        subsample=args.ss
     )
-    logger.info("Path dataset for link prediction: n=%d", len(path_dataset))
+    n_paths = len(path_dataset)
+    avg_pl = sum(len(d) for d in path_dataset.values()) / n_paths
+    logger.info("Path dataset for link prediction: n=%d, mean path length %.3f", n_paths, avg_pl)
     if not args.ns:
         with open(
             os.path.join(write_dir, "paths.json"), "w", encoding=sys.getdefaultencoding()
