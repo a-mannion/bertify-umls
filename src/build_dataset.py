@@ -14,20 +14,17 @@ There are three main parts to this:
 import os
 import sys
 import json
-import logging
 import warnings
-from tqdm import tqdm
 from argparse import ArgumentParser, Namespace
-from typing import Union, Dict, List, Tuple, Optional
+from typing import Union, Dict, Tuple, Optional
 
 import pandas as pd
 
 
-# command line arguments
 UMLS_DIR_HELP = """Path to the directory containing the base UMLS dataset (should end with
 `2022AB/META`)"""
 SRDEF_PATH_HELP = """Path to the basic information file for semantic types and relations (SRDEF
-from the UMLS semantic network)"""
+from the UMLS semantic network )"""
 SG_PATH_HELP = """Path to the semantic groups text file"""
 WRITE_PATH_HELP = """Directory in which to write the output datasets"""
 LANG_HELP = """Filter the dataset by language if desired. Must be specified in the format
@@ -40,14 +37,8 @@ NSAMPLESBASE_HELP = """Number of triplets to create from the base data tables - 
 will sample from all of the data"""
 MAXPATHLEN_HELP = """Cutoff length for the random walks across the graph to create link prediction
 sequences"""
-LANGSTRATTYPE_HELP = """Type of stratification for use in multilingual datasets. Can take values
-`eq` for the same number of samples from each language or `rel` for proportional sampling;
-defaults to `none`. Note that this does not guarantee that the final outputs will conform
-exactly to the chosen proportions when further random sampling is done at the level of semantic
-groups."""
 
 
-# Metathesaurus data fields
 SRDEF_COLNAMES = "RT", "UI", "STY_or_RL", "STN_or_RTN", "DEF" \
     "EX", "UN", "NH", "ABR", "RIN"
 SEMANTIC_GROUPS_COLNAMES = "Abbrev", "Name", "TUI", "TypeName"
@@ -60,18 +51,16 @@ MRREL_COLNAMES = "CUI1", "AUI1", "STYPE1", "REL", "CUI2", "AUI2", \
     "SUPPRESS", "CVF"
 INCLUDE_GROUPS = "CHEM", "DISO", "ANAT", "PROC", "CONC", "DEVI", \
     "PHEN", "PHYS"
-EXCLUDE_SEMANTIC_TYPES = (
-    "Plant", "Fungus", "Animal", "Vertebrate",
-    "Amphibian", "Bird", "Fish", "Reptile", "Mammal", "Event",
-    "Activity", "Social Behaviour", "Daily or Recreational Activity",
-    "Occupational Activity", "Governmental or Regulatory Activity",
-    "Educational Activity", "Machine Activity", "Conceptual Entity",
-    "Geographic Area", "Regulation or Law", "Organization",
-    "Professional Society", "Self-help or Relief Organization",
-    "Professional or Occupational Group", "Family Group",
-    "Chemical Viewed Structurally", "Intellectual Product",
+EXCLUDE_SEMANTIC_TYPES = "Plant", "Fungus", "Animal", "Vertebrate", \
+    "Amphibian", "Bird", "Fish", "Reptile", "Mammal", "Event", \
+    "Activity", "Social Behaviour", "Daily or Recreational Activity", \
+    "Occupational Activity", "Governmental or Regulatory Activity", \
+    "Educational Activity", "Machine Activity", "Conceptual Entity", \
+    "Geographic Area", "Regulation or Law", "Organization", \
+    "Professional Society", "Self-help or Relief Organization", \
+    "Professional or Occupational Group", "Family Group", \
+    "Chemical Viewed Structurally", "Intellectual Product", \
     "Language", "Eukaryote"
-)
 
 
 def parse_arguments() -> Namespace:
@@ -81,20 +70,11 @@ def parse_arguments() -> Namespace:
     parser.add_argument("srdef", type=str, help=SRDEF_PATH_HELP)
     parser.add_argument("sg", type=str, help=SG_PATH_HELP)
     parser.add_argument("writepath", type=str, help=WRITE_PATH_HELP)
-    parser.add_argument("--lang", type=str, nargs="+", default="ENG", help=LANG_HELP)
-    parser.add_argument("--load_base_tables", type=str, help=LBT_HELP)
-    parser.add_argument("--n_samples", type=int, default=10000, help=NSAMPLES_HELP)
-    parser.add_argument("--n_samples_base", type=int, help=NSAMPLESBASE_HELP)
-    parser.add_argument("--max_path_len", type=int, default=10, help=MAXPATHLEN_HELP)
-    parser.add_argument(
-        "--lang_strat_type",
-        type=str,
-        choices={"none", "eq", "rel"},
-        default="none",
-        help=LANGSTRATTYPE_HELP
-    )
-    parser.add_argument("--verbose", action="store_true")
-
+    parser.add_argument("--lang", type=str, help=LANG_HELP)
+    parser.add_argument("--load_base_tables", type=str)
+    parser.add_argument("--n_samples", type=int, default=10000)
+    parser.add_argument("--n_samples_base", type=int)
+    parser.add_argument("--max_path_len", type=int, default=10)
     return parser.parse_args()
 
 
@@ -103,25 +83,20 @@ def build_metathesaurus_tables(
     srdef_path: Union[str, os.PathLike],
     sg_path: Union[str, os.PathLike],
     filter_types: bool=True,
-    lang: Optional[Union[str, List[str]]]=None,
-    chunksize: Optional[int]=None,
-    logger: Optional[logging.Logger]=None
+    lang: Optional[str]=None,
+    chunksize: Optional[int]=None
 ) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     """Load and process data from the standard UMLS download"""
     # load SRDEF: base table for info about semantic types
     srdef_usenames = ["RT", "UI", "STY_or_RL"]
-    if logger:
-        logger.info("[build_metathesaurus_tables] Loading %s...", srdef_path)
     srdef = pd.read_csv(
-        srdef_path, sep="|", engine="c",
+        srdef_path, sep="|",
         usecols=[SRDEF_COLNAMES.index(name) for name in srdef_usenames],
         names=srdef_usenames
     )
     stypes = srdef[srdef.RT == "STY"]  # here we"re only interested in STs, not relations
-    if logger:
-        logger.info("[build_metathesaurus_tables] Loading %s...", sg_path)
     sem_groups = pd.read_csv(  # semantic group table: we use this to map SGs to TUIs
-        sg_path, sep="|", engine="c", names=["Abbrev", "Name", "TUI", "TypeName"]
+        sg_path, sep="|", names=["Abbrev", "Name", "TUI", "TypeName"]
     )
     tui2sg = sem_groups.set_index("TUI").Abbrev.to_dict()
     stypes["SG"] = stypes.UI.apply(lambda x: tui2sg[x])
@@ -130,10 +105,8 @@ def build_metathesaurus_tables(
             ~stypes.STY_or_RL.isin(EXCLUDE_SEMANTIC_TYPES)
         stypes = stypes[select_types]
     mrsty_usenames = ["CUI", "TUI", "STN", "STY"]
-    if logger:
-        logger.info("[build_metathesaurus_tables] Loading MRSTY table for linking...")
     mrsty = pd.read_csv(  # MRSTY: links CUIs to semantic types
-        os.path.join(umls_path, "MRSTY.RRF"), sep="|", engine="c",
+        os.path.join(umls_path, "MRSTY.RRF"), sep="|",
         usecols=[MRSTY_COLNAMES.index(name) for name in mrsty_usenames],
         names=mrsty_usenames
     )
@@ -145,28 +118,22 @@ def build_metathesaurus_tables(
     # types, i.e. lower tree depth
     # for concepts with more than one lowest-depth semantic type,
     # we just use the first one to appear in the table
-    if logger:
-        logger.info("[build_metathesaurus_tables] Preprocessing semantic groups...")
     mrsty_sg["tree_depth"] = mrsty_sg.STN.apply(lambda x: len(x.split(".")))
     min_depths = mrsty_sg[["CUI", "tree_depth"]].groupby("CUI").tree_depth.transform(min)
     mrsty_sg = mrsty_sg[min_depths == mrsty_sg.tree_depth]
     mrsty_sg.drop_duplicates(subset=["CUI"], inplace=True)
 
     # load & filter all concepts, names and relations
-    if logger:
-        logger.info("[build_metathesaurus_tables] Loading concept table...")
     mrconso_usenames = ["CUI", "LAT", "ISPREF", "AUI", "STR"]
     chunksize = int(1e7) if chunksize is None else chunksize
     mrconso_reader = pd.read_csv(
-        os.path.join(umls_path, "MRCONSO.RRF"), sep="|", engine="c",
+        os.path.join(umls_path, "MRCONSO.RRF"), sep="|",
         usecols=[MRCONSO_COLNAMES.index(name) for name in mrconso_usenames],
         names=mrconso_usenames, chunksize=chunksize
     )
     for chunk in mrconso_reader:
-        if isinstance(lang, str):
+        if lang:
             chunk = chunk[chunk.LAT == lang]
-        elif isinstance(lang, list):
-            chunk = chunk[chunk.LAT.isin(lang)]
         try:
             mrconso = pd.concat((mrconso, chunk))
         except NameError:
@@ -188,11 +155,9 @@ def build_metathesaurus_tables(
     )).reset_index(drop=True)
     mrconso_ref.drop(["ISPREF"], axis=1, inplace=True)
 
-    if logger:
-        logger.info("[build_metathesaurus_tables] Loading relation table...")
     mrrel_usenames = ["CUI1", "AUI1", "REL", "CUI2", "AUI2"]
     mrrel_reader = pd.read_csv(
-        os.path.join(umls_path, "MRREL.RRF"), sep="|", engine="c",
+        os.path.join(umls_path, "MRREL.RRF"), sep="|",
         usecols=[MRREL_COLNAMES.index(name) for name in mrrel_usenames],
         names=mrrel_usenames, chunksize=chunksize
     )
@@ -204,8 +169,6 @@ def build_metathesaurus_tables(
             mrrel = chunk
 
     # add semantic groups to the relations table
-    if logger:
-        logger.info("[build_metathesaurus_tables] Merging with semantic groups...")
     mrconso_ref.set_index("CUI", inplace=True)
     cui2sg = mrconso_ref.SG.to_dict()
     mrrel_sg_cols = {
@@ -262,7 +225,7 @@ def build_triple_dataset(
     # which case, for the target concept (CUI1), we pick another string
     # associated with the same CUI from the mrconso_other table, which has
     # all the other terms for that concept
-    dataset = dataset.merge(mrconso_ref[["STR", "LAT"]], how="left", left_on="CUI2", right_on="CUI") \
+    dataset = dataset.merge(mrconso_ref[["STR"]], how="left", left_on="CUI2", right_on="CUI") \
         .rename({"STR": "STR2"}, axis=1)
     synonyms = dataset[dataset.REL == "SY"]
     other_rels = dataset[~dataset.index.isin(synonyms.index)]
@@ -286,10 +249,7 @@ def build_triple_classification_dataset(
     size: Optional[int]=None
 ) -> pd.DataFrame:
     """Sample from the base dataset to create a dataset of triples with binary true/false labels"""
-    triple_sample = triple_dataset
-    if size:
-        if size < len(triple_dataset):
-            triple_sample = triple_dataset.sample(size)
+    triple_sample = triple_dataset.sample(size) if size else triple_dataset
     triple_sample["clf_label"] = [1 for _ in range(len(triple_sample))]
     sg_sample_sizes = triple_sample[["SG2"]].reset_index(drop=False).groupby("SG2") \
         .count().iloc[:,0].to_dict()
@@ -315,14 +275,12 @@ def build_triple_classification_dataset(
                 # check if a relation exists
                 sample_target_concept = sg_concepts.sample().reset_index().transpose() \
                     .iloc[:, 0].to_dict()
-                
             neg_relation = relations.sample().item()
-            # columns: CUI1, AUI1, REL, CUI2, AUI2, STR2, LAT, STR1, clf_label
             triple_sample.loc[triple_sample.index.max() + 1] = [
                 sample_target_concept["CUI"],
                 sample_target_concept["AUI"],
                 neg_relation, row.name, row.AUI,
-                row.STR, None, sample_target_concept["STR"], 0
+                row.STR, sample_target_concept["STR"], 0
             ]
 
     # negative sampling strategy 2: find any relation for which the two concepts come from
@@ -345,7 +303,7 @@ def build_triple_classification_dataset(
             cui1, sample_concept1.AUI.item(), rel,
             sample_concept2.index.item(),
             sample_concept2.AUI.item(),
-            sample_concept1.STR.item(), None,
+            sample_concept1.STR.item(),
             sample_concept2.STR.item(), 0
         ]
     return triple_sample.sample(frac=1.)
@@ -354,20 +312,13 @@ def build_triple_classification_dataset(
 def build_path_dataset(
     triple_dataset: pd.DataFrame,
     size: int,
-    max_path_len: int,
-    progress_bar: Optional[bool]=False
+    max_path_len: int
 ) -> Dict[str, Dict[str, str]]:
     """Constructs a dataset of `semantic paths` for the link prediction subtask"""
     triple_dataset_pathselect = triple_dataset[triple_dataset.REL != "SY"]
     path_dataset = {}
     path_id = 0
-    if size > len(triple_dataset):
-        size = len(triple_dataset)
-    for _, sample in tqdm(
-        triple_dataset_pathselect.iterrows(),
-        total=size,
-        disable=not progress_bar
-    ):
+    for _, sample in triple_dataset_pathselect.iterrows():
         triple = sample.to_dict()
         cui_path = [triple["CUI1"]]
         path = {"t0": {k: triple[k] for k in ("STR2", "REL", "STR1")}}
@@ -395,15 +346,10 @@ def build_path_dataset(
     return path_dataset
 
 
-def main(args: Namespace, logger: logging.Logger) -> None:
+def main(args: Namespace) -> None:
     warnings.filterwarnings("ignore", category=pd.errors.SettingWithCopyWarning)
     warnings.filterwarnings("ignore", category=pd.errors.DtypeWarning)
-    monolingual = len(args.lang) == 1
-    if monolingual:
-        args.lang = args.lang.pop()
-        subdir_stem = args.lang.lower() + "_v"
-    else:
-        subdir_stem = "multi_v"
+    subdir_stem = args.lang.lower() + "_v"
     datagen_version = 0
     while subdir_stem + str(datagen_version) in os.listdir(args.writepath):
         datagen_version += 1
@@ -412,11 +358,9 @@ def main(args: Namespace, logger: logging.Logger) -> None:
     os.mkdir(write_dir)
     if args.load_base_tables is None:
         mrconso_ref, mrconso_other, mrrel = build_metathesaurus_tables(
-            args.umls_dir, args.srdef, args.sg, lang=args.lang,
-            logger=None if args.verbose else logger
+            args.umls_dir, args.srdef, args.sg, lang=args.lang
         )
         bt_dir = os.path.join(write_dir, "base_metathesaurus_tables")
-        logger.info("Base tables constructed, writing out to %s...", bt_dir)
         os.mkdir(bt_dir)
         mrconso_ref.to_csv(os.path.join(bt_dir, "concept_ref.tsv"), sep="\t")
         mrconso_other.to_csv(os.path.join(bt_dir, "concepts.tsv"), sep="\t", index=False)
@@ -433,53 +377,23 @@ def main(args: Namespace, logger: logging.Logger) -> None:
         )
         mrrel = pd.read_csv(os.path.join(args.load_base_tables, "relations.tsv"), **kwargs)
 
-    logger.info(f"Writing to %s...", write_dir)
-    # entity prediction: task index 0
+    print(f"Writing to {write_dir}...")
     triple_dataset = build_triple_dataset(
         mrrel, mrconso_ref, mrconso_other, size=args.n_samples_base
     )
-    langstrat = not (monolingual or args.lang_strat_type == "none")
-    if langstrat:
-        if args.lang_strat_type == "rel":
-            lang_sample_sizes = [
-                int(args.n_samples * (triple_dataset.LAT == l).sum() / len(triple_dataset)) \
-                    for l in args.lang
-            ]
-        else:
-            lang_sample_sizes = [int(args.n_samples / len(args.lang))] * len(args.lang)
-        if len(triple_dataset) % len(args.lang) > 0:
-            lang_sample_sizes[-1] += 1
-        triple_dataset_sample_list = []
-        for lang, sample_size in zip(args.lang, lang_sample_sizes):
-            triple_dataset_sample_list.append(
-                triple_dataset[triple_dataset.LAT == lang].sample(sample_size)
-            )
-        triple_dataset_sampled = pd.concat(triple_dataset_sample_list)
-    else:
-        triple_dataset_sampled = triple_dataset.sample(args.n_samples)
-    logger.info("Triple dataset for entity prediction: n=%d", len(triple_dataset_sampled))
-    triple_dataset_sampled.to_csv(os.path.join(write_dir, "triples.tsv"), sep="\t", index=False)
-    
-    # triple classification: task index 2
-    logger.info("Building triple dataset for classification...")
+    print(f"Triple dataset for entity prediction: n={args.n_samples}")
+    triple_dataset.sample(args.n_samples) \
+        .to_csv(os.path.join(write_dir, "triples.tsv"), sep="\t", index=False)
+    triple_dataset.to_csv(os.path.join(write_dir, "triples.tsv"), sep="\t", index=False)
     triple_classification_dataset = build_triple_classification_dataset(
-        triple_dataset_sampled if langstrat else triple_dataset,
-        mrconso_ref, mrrel, size=args.n_samples
+        triple_dataset, mrconso_ref, mrrel, size=args.n_samples
     )
-    logger.info("Triple dataset for classification: n=%d", len(triple_classification_dataset))
+    print(f"Triple dataset for classification: n={len(triple_classification_dataset)}")
     triple_classification_dataset.to_csv(
         os.path.join(write_dir, "triple_clf.tsv"), sep="\t", index=False
     )
-    
-    # link prediction: task index 1
-    logger.info("Building path dataset for link prediction...")
-    path_dataset = build_path_dataset(
-        triple_dataset_sampled if langstrat else triple_dataset,
-        args.n_samples,
-        args.max_path_len,
-        progress_bar=args.verbose
-    )
-    logger.info("Path dataset for link prediction: n=%d", len(path_dataset))
+    path_dataset = build_path_dataset(triple_dataset, args.n_samples, args.max_path_len)
+    print(f"Path dataset for link prediction: n={len(path_dataset)}")
     with open(
         os.path.join(write_dir, "paths.json"), "w", encoding=sys.getdefaultencoding()
     ) as f_io:
@@ -487,11 +401,4 @@ def main(args: Namespace, logger: logging.Logger) -> None:
 
 
 if __name__ == "__main__":
-    args_ = parse_arguments()
-    logger_ = logging.getLogger(__name__)
-    logging.basicConfig(
-        format="%(asctime)s - %(levelname)s - \t%(message)s",
-        datefmt="%d/%m/%Y %H:%M:%S",
-        level=logging.INFO if args_.verbose else logging.WARNING
-    )
-    main(args_, logger_)
+    main(parse_arguments())

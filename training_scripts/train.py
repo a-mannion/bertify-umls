@@ -87,6 +87,7 @@ def parse_arguments() -> Namespace:
     parser.add_argument("kg_fp", type=str, help=KG_FP_HELP)
     parser.add_argument("corpus_fp", type=str, help=CORPUS_FP_HELP)
     parser.add_argument("model_path", type=str, help=MODEL_PATH_HELP)
+    parser.add_argument("--eval_set_dir", type=str)
     parser.add_argument("--tokenizer_path", type=str, help=TOKENIZER_PATH_HELP)
     parser.add_argument("--from_cp", action="store_true", help=FROM_CP_HELP)
     parser.add_argument("--from_scratch", action="store_true", help=FROM_SCRATCH_HELP)
@@ -151,17 +152,34 @@ def main(config: Namespace, logger: logging.Logger) -> None:
             tokenizer_path.replace("/", "--")
         )
     os.environ["TOKENIZERS_PARALLELISM"] = "true"
-    train_dataset, eval_dataset, tokenizer = prepare_mixed_dataset(
-        kb_datadir=config.kg_fp,
-        corpus_fp=config.corpus_fp,
-        tokenizer=tokenizer_path,
-        load_tokenizer_via_hf=load_tokenizer_via_hf,
-        model_max_length=config.seq_len,
-        n_text_docs=config.n_text_docs,
-        train_set_frac=config.train_set_frac,
-        add_bert_special_tokens=config.add_bert_special_tokens,
-        shuffle=True
-    )
+    if config.eval_set_dir:
+        train_dataset, tokenizer = prepare_mixed_dataset(
+            kb_datadir=config.kg_fp,
+            corpus_fp=config.corpus_fp,
+            tokenizer=tokenizer_path,
+            load_tokenizer_via_hf=load_tokenizer_via_hf,
+            model_max_length=config.seq_len,
+            n_text_docs=config.n_text_docs,
+            add_bert_special_tokens=config.add_bert_special_tokens,
+            shuffle=True
+        )
+        eval_dataset = prepare_mixed_dataset(
+            kb_datadir=os.path.join(config.eval_set_dir, "kg"),
+            corpus_fp=os.path.join(config.eval_set_dir, "txt"),
+            tokenizer=tokenizer
+        )
+    else:
+        train_dataset, eval_dataset, tokenizer = prepare_mixed_dataset(
+            kb_datadir=config.kg_fp,
+            corpus_fp=config.corpus_fp,
+            tokenizer=tokenizer_path,
+            load_tokenizer_via_hf=load_tokenizer_via_hf,
+            model_max_length=config.seq_len,
+            n_text_docs=config.n_text_docs,
+            train_set_frac=config.train_set_frac,
+            add_bert_special_tokens=config.add_bert_special_tokens,
+            shuffle=True
+        )
     vocab_size = len(tokenizer)
     rel_token_ids2labels = get_relation_labels(tokenizer)
     collate_fn = partial(

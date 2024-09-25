@@ -163,4 +163,4 @@ cython_debug/
 wandb/
 eval_scripts/
 notebooks/
-training_scripts/slurm
+training_scripts/slurm/

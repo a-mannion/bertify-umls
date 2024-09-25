@@ -155,12 +155,12 @@ def prepare_mixed_dataset(
     kb_datadir: Union[str, os.PathLike],
     corpus_fp: Union[str, os.PathLike],
     tokenizer: Union[str, os.PathLike, PreTrainedTokenizerFast],
-    load_tokenizer_via_hf: bool,
-    model_max_length: int,
+    load_tokenizer_via_hf: Optional[bool]=False,
+    model_max_length: Optional[int]=None,
     n_text_docs: Optional[int]=None,
     train_set_frac: Optional[float]=None,
-    add_bert_special_tokens: bool=True,
-    shuffle: bool=False,
+    add_bert_special_tokens: Optional[bool]=True,
+    shuffle: Optional[bool]=False,
     tokenizer_fpt_kwargs: Optional[Dict]=None
 ) -> Union[
     Tuple[BatchEncodingDataset],
