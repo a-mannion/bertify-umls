@@ -241,7 +241,7 @@ class KgiLMBert(PreTrainedModel):
             labelmin = labels[label_mask_bool].min().item() if label_mask_bool.sum().item() else 0
             assert labelmin >= 0 and labelmax < n_classes, \
                 f"Task {task_type_index_ref}: expected labels in range (0,{n_classes - 1}) \
-                    but got ({labelmin},{labelmax})"
+but got ({labelmin},{labelmax})"
         else:
             # just throw anything into the loss function, the task coefficient will be set to zero
             # (dummy run of any unused task modules)

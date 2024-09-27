@@ -9,6 +9,7 @@ from datetime import datetime
 from argparse import ArgumentParser, Namespace
 from typing import Union
 from tqdm import tqdm
+from math import ceil
 
 import torch
 import numpy as np
@@ -105,10 +106,12 @@ def parse_arguments() -> Namespace:
     parser.add_argument("--task_coefs", type=float, nargs=3, help=TASK_COEFS_HELP)
     parser.add_argument("--epoch_checkpoint_interval", type=int, default=4, help=CP_INTERVAL_HELP)
     parser.add_argument("--n_text_docs", type=int, help=N_TEXT_DOCS_HELP)
+    parser.add_argument("--n_triples", type=int)
     parser.add_argument("--constant_schedule", action="store_true", help=CONST_SCHED_HELP)
     parser.add_argument("--train_data_only", action="store_true", help=TDO_HELP)
     parser.add_argument("--nosave", action="store_true", help=NOSAVE_HELP)
     parser.add_argument("--pb", action="store_true", help=TQDM_HELP)
+    parser.add_argument("--db", action="store_true")
     parser.add_argument("--fup", action="store_true")
     return parser.parse_args()
 
@@ -124,9 +127,12 @@ def main(config: Namespace, logger: logging.Logger) -> None:
             )
         ]
     )
-    logger.setLevel(
-        logging.DEBUG if accelerator.is_local_main_process else logging.ERROR
-    )
+    if config.db:
+        log_level = logging.DEBUG
+    else:
+        log_level = logging.INFO if accelerator.is_local_main_process \
+            else logging.ERROR
+    logger.setLevel(log_level)
     set_seed(config.seed)
 
     # data loading & preprocessing
@@ -152,6 +158,12 @@ def main(config: Namespace, logger: logging.Logger) -> None:
             tokenizer_path.replace("/", "--")
         )
     os.environ["TOKENIZERS_PARALLELISM"] = "true"
+    # dataset_typeconfig = {
+    #     "input_ids": [list, int],
+    #     "attention_mask": [list, int],
+    #     "labels": [(type(None), [list, int], int)],
+    #     "task_type_index": [int]
+    # }
     if config.eval_set_dir:
         train_dataset, tokenizer = prepare_mixed_dataset(
             kb_datadir=config.kg_fp,
@@ -161,12 +173,14 @@ def main(config: Namespace, logger: logging.Logger) -> None:
             model_max_length=config.seq_len,
             n_text_docs=config.n_text_docs,
             add_bert_special_tokens=config.add_bert_special_tokens,
+            non_sequence_keys=["task_type_index", "labels"],
             shuffle=True
         )
         eval_dataset = prepare_mixed_dataset(
             kb_datadir=os.path.join(config.eval_set_dir, "kg"),
             corpus_fp=os.path.join(config.eval_set_dir, "txt"),
-            tokenizer=tokenizer
+            tokenizer=tokenizer,
+            non_sequence_keys=["task_type_index", "labels"]
         )
     else:
         train_dataset, eval_dataset, tokenizer = prepare_mixed_dataset(
@@ -176,16 +190,22 @@ def main(config: Namespace, logger: logging.Logger) -> None:
             load_tokenizer_via_hf=load_tokenizer_via_hf,
             model_max_length=config.seq_len,
             n_text_docs=config.n_text_docs,
+            n_triples=config.n_triples,
             train_set_frac=config.train_set_frac,
             add_bert_special_tokens=config.add_bert_special_tokens,
-            shuffle=True
+            non_sequence_keys=["task_type_index", "labels"],
+            shuffle=True,
+            logger=logger
         )
+    # import IPython; IPython.embed(); sys.exit()
     vocab_size = len(tokenizer)
     rel_token_ids2labels = get_relation_labels(tokenizer)
+    logger.debug("Relation token mapping: %s", ", ".join(f"{k}: {v}" for k, v in rel_token_ids2labels.items()))
     collate_fn = partial(
         mixed_collate_fn,
         tokenizer=tokenizer,
-        rel_token_ids2labels=rel_token_ids2labels
+        rel_token_ids2labels=rel_token_ids2labels,
+        logger=logger if config.db else None
     )
     train_dataloader = DataLoader(
         train_dataset,
@@ -227,7 +247,7 @@ def main(config: Namespace, logger: logging.Logger) -> None:
             task_weight_coefficients[kg_task_idx_counts == 0] = 0
             config.task_coefs = task_weight_coefficients.tolist()
             logger.info(
-                "Calculated task coefficients: %s",
+                "Calculated KG task coefficients: %s",
                 ", ".join(map(str, config.task_coefs))
             )
         model = KgiLMBert(
@@ -274,7 +294,7 @@ def main(config: Namespace, logger: logging.Logger) -> None:
     # finalise training parameters, objects, and functions
     n_train = len(train_dataset)
     n_train_batches = len(train_dataloader)
-    optimizer_updates_per_epoch = int(n_train_batches / config.grad_acc)
+    optimizer_updates_per_epoch = ceil(n_train_batches / config.grad_acc)
     total_train_steps = config.epochs * optimizer_updates_per_epoch
     model, optimizer, train_dataloader, eval_dataloader = accelerator.prepare(
         model, optimizer, train_dataloader, eval_dataloader

@@ -10,7 +10,9 @@ from collections import defaultdict
 from string import punctuation
 from random import sample
 from pathlib import Path
+from logging import Logger
 from typing import Union, Optional, List, Tuple, Type, Dict, Callable
+# from typing_extensions import TypedDict
 
 import torch
 from torch.utils import data
@@ -34,7 +36,7 @@ class Bunch:
         checked_kwargs = {k: v for k, v in kwargs.items() if isinstance(v, self._acceptable_types)}
         self.__dict__.update(checked_kwargs)
 
-    def __getattr__(self, name):
+    def __getattr__(self, name: str):
         try:
             return self.__dict__[name]
         except KeyError:
@@ -48,8 +50,16 @@ class BatchEncodingDataset(data.Dataset):
     """Pytorch dataset that unwraps transformers batch encodings to be more easily accessible
     by data loaders"""
 
-    def __init__(self, data_, return_tensors=True):
+    def __init__(
+        self,
+        data_,
+        return_tensors=True,
+        # typeconfig=None,
+        non_sequence_keys=None
+    ):
         super().__init__()
+        self.return_tensors = return_tensors
+        self.non_sequence_keys = non_sequence_keys if non_sequence_keys else ()
         if isinstance(data_, BatchEncoding):
             self._init_sequences(data_)
         elif isinstance(data_, (list, tuple)):
@@ -60,7 +70,6 @@ class BatchEncodingDataset(data.Dataset):
                             self.__dict__[k] += encoding[k]
                     else:
                         self._init_sequences(encoding)
-        self.return_tensors = return_tensors
 
     def __len__(self):
         return len(getattr(self, self._keys[0]))
@@ -72,7 +81,7 @@ class BatchEncodingDataset(data.Dataset):
 
     def _init_sequences(self, batch_encoding):
         self._keys = tuple(batch_encoding.keys())
-        self.__dict__.update(dict(batch_encoding.items()))
+        self.__dict__.update(dict(batch_encoding.items())) 
 
 
 def load_kgi_tokenizer(
@@ -158,10 +167,13 @@ def prepare_mixed_dataset(
     load_tokenizer_via_hf: Optional[bool]=False,
     model_max_length: Optional[int]=None,
     n_text_docs: Optional[int]=None,
+    n_triples: Optional[int]=None,
     train_set_frac: Optional[float]=None,
     add_bert_special_tokens: Optional[bool]=True,
+    non_sequence_keys: Optional[List[str]]=None,
     shuffle: Optional[bool]=False,
-    tokenizer_fpt_kwargs: Optional[Dict]=None
+    tokenizer_fpt_kwargs: Optional[Dict]=None,
+    logger: Optional[Logger]=None
 ) -> Union[
     Tuple[BatchEncodingDataset],
     Tuple[BatchEncodingDataset, BatchEncodingDataset],
@@ -199,7 +211,12 @@ def prepare_mixed_dataset(
     shuffle:
         Randomise the order of the training sequences before BERT-specific processing
     """
-    kb_sequence_dataset = _build_kb_sequence_dataset(kb_datadir, shuffle=shuffle)
+    kb_sequence_dataset = _build_kb_sequence_dataset(kb_datadir, n_triples, shuffle=shuffle)
+    if logger:
+        kbseq_info = "\n\t".join(
+            f"{i}. {k}: {type(v).__name__} |{len(v)}|" for i, (k, v) in enumerate(kb_sequence_dataset.items())
+        )
+        logger.debug("[data_utils.prepare_mixed_dataset] KB sequence dataset built: \n\t%s", kbseq_info)
     if os.path.isfile(corpus_fp):
         sentences = _load_sentences(corpus_fp, n_text_docs)
     elif os.path.isdir(corpus_fp):
@@ -235,16 +252,22 @@ def prepare_mixed_dataset(
 
     # indicators for sequence types: 0 for entity prediction triples, 1 for paths,
     # 2 for classification triples, and 3 for sentences
-    # and also add a `labels` attribute to the paths and sentences so that they can go in a
-    # BatchEncodingDataset with the triples; the actual training labels will be
-    # added at collation
+    # also adds a `labels` attribute to the paths, sentences and entity prediction triples
+    # so that they can go in a BatchEncodingDataset with the triples; the actual training
+    # labels will be added at collation
     split_dataset = list()
     for i, enc in enumerate((
         triple_encoding_entpred, path_encoding, triple_encoding_clf, corpus_encoding
     )):
-        enc["task_type_index"] = (i * torch.ones(len(enc["input_ids"]))).tolist()
+        n = len(enc["input_ids"])
+        if logger:
+            logger.debug(
+                "[data_utils.prepare_mixed_dataset] processing encoding %d: n=%d, keys: %s",
+                i, n, ", ".join(enc.keys())
+            )
+        enc["task_type_index"] = (i * torch.ones(n)).tolist()
         if "labels" not in enc:
-            enc["labels"] = [None for _ in range(len(enc["input_ids"]))]
+            enc["labels"] = [None] * n
         if train_set_frac:
             split_enc = defaultdict(dict)
             for k, v in enc.items():
@@ -254,14 +277,18 @@ def prepare_mixed_dataset(
                 split_enc["eval"][k] = eval_data
             split_dataset.append(split_enc)
 
+    dataset_init = partial(
+        BatchEncodingDataset,
+        return_tensors=False,
+        non_sequence_keys=non_sequence_keys
+    )
     if split_dataset:
         train_dataset_input = [BatchEncoding(enc["train"]) for enc in split_dataset]
         eval_dataset_input = [BatchEncoding(enc["eval"]) for enc in split_dataset]
-        dataset = BatchEncodingDataset(train_dataset_input, return_tensors=False), \
-            BatchEncodingDataset(eval_dataset_input, return_tensors=False)
+        dataset = dataset_init(train_dataset_input), dataset_init(eval_dataset_input)
     else:
         dataset_input = triple_encoding_entpred, path_encoding, triple_encoding_clf, corpus_encoding
-        dataset = BatchEncodingDataset(dataset_input, return_tensors=False),
+        dataset = dataset_init(dataset_input),
     if return_tokenizer:
         return *dataset, tokenizer
     return dataset
@@ -286,11 +313,12 @@ def get_relation_labels(
 
 
 def mixed_collate_fn(
-    batch_examples: List[BatchEncoding],
+    batch_examples: List[Union[BatchEncoding, Dict]],
     tokenizer: PreTrainedTokenizerFast,
     rel_token_ids2labels: Optional[dict]=None,
     return_enc_dicts: bool=False,
-    exclude_relation_types: Optional[Tuple[str]]=None
+    exclude_relation_types: Optional[Tuple[str]]=None,
+    logger: Optional[Logger]=None
 ) -> Union[Tuple[dict], BatchEncoding]:
     """Data collation function to pass to the DataLoader for UMLS-KGI training. This implements
     `smart batching`, whereby sequences are padded to the maximal length within individual batches
@@ -310,7 +338,13 @@ def mixed_collate_fn(
             if isinstance(data_val, list) and k in pad_id_mapping:
                 diff = max_len - len(data_val)
                 padded_seq = data_val + [pad_id_mapping[k]] * diff
-                batch_ex[k] = torch.tensor(padded_seq, dtype=torch.long)    
+                try:
+                    batch_ex[k] = torch.tensor(padded_seq, dtype=torch.long)
+                except ValueError as ve:
+                    if logger:
+                        logger.debug("caught this: %s", ve)
+                        logger.debug("data point:\n\tk = %s |data_val| = %d", k, len(data_val))
+                        logger.debug("diff = %d, |padded_seq| = %d", diff, len(padded_seq))
 
     # split into tasks
     entpred_triples = [b for b in batch_examples if b["task_type_index"] == 0]
@@ -318,12 +352,21 @@ def mixed_collate_fn(
     clf_triples = [b for b in batch_examples if b["task_type_index"] == 2]
     sentences = [b for b in batch_examples if b["task_type_index"] == 3]
     hrel_token_id = tokenizer.additional_special_tokens_ids[-1]
-    relation_token_ids = tokenizer.additional_special_tokens_ids[:-1]
     if rel_token_ids2labels is None:
         rel_token_ids2labels = get_relation_labels(
-            tokenizer, relation_token_ids, exclude_relation_types
+            tokenizer, exclude_relation_types=exclude_relation_types
         )
+    relation_token_ids = list(rel_token_ids2labels)
 
+    
+    # def _maybe_show_labeltype_debug_message(enc, collation_mode):
+    #     if logger and not all(map(lambda l: isinstance(l, int), enc["labels"])):
+    #         logger.debug(
+    #             "[data_utils.mixed_collate_fn] %s collation: %d non-integer labels in batch of %d - found %s",
+    #             collation_mode, sum(map(lambda l: not isinstance(l, int), enc["labels"])), len(enc["labels"]),
+    #             ", ".join(set(map(str, filter(lambda t: t != int, map(type, enc["labels"])))))
+    #         )
+    
     # encode/collate the different sequence types separately
     model_input_names = ["input_ids", "attention_mask", "labels", "task_type_index"]
     if entpred_triples:
@@ -334,6 +377,7 @@ def mixed_collate_fn(
             model_input_names=model_input_names,
             return_dict=True
         )
+        # _maybe_show_labeltype_debug_message(triple_encodings_ep, "Entity prediction")
         enc_dicts = triple_encodings_ep,
     else:
         enc_dicts = ()
@@ -346,6 +390,7 @@ def mixed_collate_fn(
             rel_token_ids2labels=rel_token_ids2labels,
             return_dict=True
         )
+        # _maybe_show_labeltype_debug_message(path_encodings, "Link prediction")
         enc_dicts = *enc_dicts, path_encodings
     if clf_triples:
         clf_triple_data = defaultdict(list)
@@ -373,6 +418,7 @@ def mixed_collate_fn(
         sentence_encodings["input_ids"] = sentence_ids
         sentence_encodings["attention_mask"] = torch.stack([s["attention_mask"] for s in sentences])
         sentence_encodings["task_type_index"] = [s["task_type_index"] for s in sentences]
+        # _maybe_show_labeltype_debug_message(sentence_encodings, "MLM")
         enc_dicts = *enc_dicts, sentence_encodings
 
     if return_enc_dicts:
@@ -381,15 +427,15 @@ def mixed_collate_fn(
     # stack all the separate task tensors back together
     output_dict = {}
     for i, k in enumerate(model_input_names):
-        output_value = []
+        output_data = []
         for enc_dict in enc_dicts:
             if isinstance(enc_dict[k], torch.Tensor):
-                output_value.append(enc_dict[k])
+                output_data.append(enc_dict[k])
             elif isinstance(enc_dict[k], list):
-                output_value.extend(enc_dict[k])
+                output_data.extend(enc_dict[k])
         if k != "labels":  # labels can have varying dimensions so need to be kept as a list
             tensor_elems = []
-            for elem in output_value:
+            for elem in output_data:
                 if isinstance(elem, torch.Tensor):
                     if len(elem.shape) == 1:
                         tensor_elems.append(elem.unsqueeze(0))
@@ -405,7 +451,7 @@ def mixed_collate_fn(
                     )
                     tensor_elems.append(elem)
             try:
-                output_value = torch.cat(tensor_elems).squeeze()
+                output_data = torch.cat(tensor_elems).squeeze()
             except RuntimeError as rterr:
                 def _showtensortypes(tensor_elems):
                     vals, txt = [], []
@@ -422,20 +468,41 @@ def mixed_collate_fn(
                     _showtensortypes(tensor_elems) + \
                     f", because:\n{rterr}"
                 )
-        if not i:  # first iteration
-            l = len(output_value)
-        else:
-            if l != len(output_value):
-                warnings.warn(
-                    f"Collation: came across inconsistent batch element length {l} for {k}:\n"
-                    f"{', '.join(k + ': ' + str(len(v)) for k, v in output_value.items())}"
+        elif logger:
+            n_none = sum(l is None for l in output_data)
+            if n_none:
+                logger.debug(
+                    "[data_utils.mixed_collate_fn] Label inspection: %s empty values in output labels",
+                    n_none
                 )
-        output_dict[k] = output_value
+        if not i:  # first iteration
+            l = len(output_data)
+        elif l != len(output_data):
+            warnings.warn(
+                f"Collation: came across inconsistent batch element length {l} for {k}:\n"
+                f"{', '.join(k + ': ' + str(len(v)) for k, v in output_data.items())}"
+            )
+        output_dict[k] = output_data
+    if logger:
+        for i in range(len(batch_examples)):
+            if output_dict["labels"][i] is None:
+                logger.debug(
+                    "[data_utils.mixed_collate_fn] task %d instance label is None",
+                    output_dict["task_type_index"][i]
+                )
+            elif isinstance(output_dict["labels"][i], torch.Tensor):
+                if any(l is None for l in output_dict["labels"][i]):
+                    logger.debug(
+                        "[data_utils.mixed_collate_fn] task %d instance label contains None\nValues: %s",
+                        output_dict["task_type_index"][i], repr(output_dict["labels"][i])
+                    )
+                
     return BatchEncoding(output_dict)
 
 
 def _build_kb_sequence_dataset(
     dir_: Union[str, os.PathLike],
+    n_triples: Optional[int]=None,
     shuffle: bool=False
 ) -> Dict[str, Union[Dict[str, List[str]], List[str]]]:
     punc = re.sub(r"'|\[|\]", "", punctuation)
@@ -443,7 +510,9 @@ def _build_kb_sequence_dataset(
     with open(os.path.join(dir_, "paths.json"), encoding=TEXT_ENC) as f_io:
         path_dataset = json.load(f_io)
     path_sequences = _make_path_sequences(path_dataset, clean_f)
-    kwargs = {"sep": "\t", "engine": "pyarrow", "dtype_backend": "pyarrow"}
+    kwargs = {"sep": "\t", "nrows": n_triples, "engine": "c"}
+    if not n_triples:
+        kwargs = kwargs.update({"engine": "pyarrow", "dtype_backend": "pyarrow"})
     entpred_dataset = read_csv(os.path.join(dir_, "triples.tsv"), **kwargs)
     relation_tokens = entpred_dataset.REL.drop_duplicates().apply(lambda x: f"[{x}]").to_list()
     ep_sequences = _make_triple_sequence_list(entpred_dataset, clean_f)
@@ -458,8 +527,8 @@ def _build_kb_sequence_dataset(
     }
     output_data = {
         "triples_ep": ep_sequences,
-        "triples_clf": clf_sequences,
         "paths": path_sequences,
+        "triples_clf": clf_sequences,
         "relation_tokens": relation_tokens
     }
     return output_data
@@ -472,9 +541,9 @@ def _load_sentences(data_fp: Union[str, os.PathLike], n_docs: int) -> List[str]:
         else:
             text = []
             for i, line in enumerate(f_io):
-                text.append(line.replace("\n", ""))
                 if i == n_docs:
                     break
+                text.append(line.replace("\n", ""))
     return text
 
 
