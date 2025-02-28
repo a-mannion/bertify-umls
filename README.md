@@ -9,6 +9,17 @@ The code in this repository accompanies the paper "UMLS-KGI-BERT: Data-Centric K
 
 Details on how to parameterise the scripts can be obtained by running them with the `-h` flag.
 
+### Pre-trained models
+Models trained using this setup are available on Hugging Face:
+
+- [UMLS-KGI-BERT-multilingual](https://huggingface.co/a-mannion/umls-kgi-bert-trilingual)
+- [UMLS-KGI-BERT-FR](https://huggingface.co/a-mannion/umls-kgi-bert-fr)
+- [UMLS-KGI-BERT-EN](https://huggingface.co/a-mannion/umls-kgi-bert-en)
+- [UMLS-KGI-BERT-ES](https://huggingface.co/a-mannion/umls-kgi-bert-es)
+- [DrBERT-UMLS-KGI](https://huggingface.co/a-mannion/drbert-umls-kgi)
+- [PubMedBERT-UMLS-KGI](https://huggingface.co/a-mannion/pubmedbert-umls-kgi)
+- [BioRoBERTa-ES-UMLS-KGI ](https://huggingface.co/a-mannion/bioroberta-es-umls-kgi)
+
 Paper citations:
 ```
 @inproceedings{mannion-etal-2023-umls,
